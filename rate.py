@@ -21,8 +21,7 @@ with col1:
     # Changed from Specific Gravity to Gas Density
     gas_density = st.number_input("Gas Density (lb/ft³)", min_value=0.1, value=4.6, step=0.1)
     water_density = st.number_input("Water Density (lb/ft³)", min_value=10.0, value=67.0, step=0.1)
-    z_factor = st.number_input("Z-Factor", min_value=0.1, value=0.88433, step=0.00001)
-
+    z_factor = st.number_input("Z-Factor", min_value=0.1000, value=0.8843, step=0.0001, format="%0.4f")
 with col2:
     st.subheader("Wellhead Conditions")
     pressure = st.number_input("Wellhead Pressure (psia)", min_value=10.0, value=292.7, step=0.1)
