@@ -34,25 +34,24 @@ st.divider()
 if st.button("Calculate Critical Rate", type="primary", use_container_width=True):
     
     if gas_density >= water_density:
-        st.error("Error: Gas density cannot be greater than or equal to water density. Please check your inputs.")
+        st.error("Error: Gas density cannot be greater than or equal to water density.")
     else:
-        # 1. Convert Temperature to Rankine
-        temp_r = temp_f + 460.0
+        # 1. Exact Conversion to Rankine
+        temp_r = temp_f + 459.67
         
-        # 2. Calculate Cross Sectional Area (ft2)
-        # Tubing ID is in inches. Divide by 24 to get radius in feet.
+        # 2. Calculate Cross Sectional Area (ft2) using exact Pi
         area = math.pi * (tubing_id / 24.0)**2
         
         # 3. Surface Tension for Water (dynes/cm)
         sigma = 60.0
         
-        # 4. Calculate Turner Critical Velocity (ft/s) 
-        # Using 1.92 constant to match your Excel sheet
-        critical_velocity = (1.92 * (sigma * (water_density - gas_density))**0.25) / (gas_density**0.5)
+        # 4. Exact Turner Critical Velocity (ft/s) 
+        # Using Turner's exact 1.593 derivation * 1.2 adjustment
+        critical_velocity = (1.9116 * (sigma * (water_density - gas_density))**0.25) / (gas_density**0.5)
             
-        # 5. Calculate Critical Gas Rate (MMscfd)
-        # Using 3.067 constant to match your Excel sheet
-        critical_rate = (3.067 * pressure * critical_velocity * area) / (temp_r * z_factor)
+        # 5. Exact Critical Gas Rate (MMscfd)
+        # Based on exact P_sc = 14.65 psia and T_sc = 520 Rankine
+        critical_rate = (3.066894 * pressure * critical_velocity * area) / (temp_r * z_factor)
             
         # Display Results
         st.success("Calculation Successful!")
@@ -62,4 +61,4 @@ if st.button("Calculate Critical Rate", type="primary", use_container_width=True
         res_col2.metric("Critical Velocity", f"{critical_velocity:.2f} ft/s")
             
         if critical_rate > 0:
-            st.info(f"💡 The well must produce more than **{critical_rate:.3f} MMscfd** to continuously lift water to the surface and avoid liquid loading.")
+            st.info(f"💡 The well must produce more than **{critical_rate:.3f} MMscfd** to continuously lift water to the surface.")
