@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import math
+import io
 from scipy.optimize import curve_fit
 import plotly.graph_objects as go
 
@@ -250,6 +251,74 @@ if uploaded_file is not None:
                         st.warning(f"**Workover Incremental Gain**\n\n"
                                    f"**+{incremental_gain:.1f} MMscf**\n\n"
                                    f"Extends production by {max(0, wo_limit_idx - base_limit_idx)} months")
+
+                    # --- EXCEL EXPORT GENERATION ---
+                    # 1. Monthly Forecast Table
+                    df_forecast_export = pd.DataFrame({
+                        'Forecast Date': [d.strftime('%Y-%m-%d') for d in forecast_dates],
+                        'Forecast Gas Rate (MMscfd)': np.round(forecast_qg, 4),
+                        'Wellhead Pressure Pwh (psig)': np.round(forecast_Pwh_psig, 2),
+                        'Flowline Pressure Pfl (psig)': np.round(forecast_Pfl_psig, 2),
+                        'Base Critical Rate qc (MMscfd)': np.round(forecast_qc_base, 4),
+                        'Workover Critical Rate qc (MMscfd)': np.round(forecast_qc_wo, 4),
+                        'Base Active Status': ['Active' if i < base_limit_idx else 'Failed/Loaded' for i in range(future_months)],
+                        'Workover Active Status': ['Active' if i < wo_limit_idx else 'Failed/Loaded' for i in range(future_months)]
+                    })
+
+                    # 2. Summary Metrics Sheet
+                    df_summary_export = pd.DataFrame({
+                        'Parameter / Metric': [
+                            'Annual Decline Rate (Di)',
+                            'Arps b-factor',
+                            'Monthly Pressure Drop (psi/mo)',
+                            'Base Tubing ID (in)',
+                            'Workover Tubing ID (in)',
+                            'Workover Scheduled Date',
+                            'Historical Cumulative Gas (MMscf)',
+                            'Base Forecast Cumulative Gas (MMscf)',
+                            'Base Total Lifetime Cumulative (MMscf)',
+                            'Base Failure Reason',
+                            'Workover Forecast Cumulative Gas (MMscf)',
+                            'Workover Total Lifetime Cumulative (MMscf)',
+                            'Workover Failure Reason',
+                            'Incremental Cumulative Gain (MMscf)',
+                            'Production Extension (Months)'
+                        ],
+                        'Value': [
+                            f"{fit_Di*12*100:.2f}%",
+                            f"{fit_b:.2f}",
+                            f"{monthly_dP:.2f}",
+                            f"{tubing_id}",
+                            f"{wo_tubing}",
+                            f"{wo_date_input.strftime('%Y-%m-%d')}",
+                            f"{hist_cum_mmscf:.2f}",
+                            f"{base_forecast_cum:.2f}",
+                            f"{base_total_cum:.2f}",
+                            f"{base_death_reason}",
+                            f"{wo_forecast_cum:.2f}",
+                            f"{wo_total_cum:.2f}",
+                            f"{wo_death_reason}",
+                            f"{incremental_gain:.2f}",
+                            f"{max(0, wo_limit_idx - base_limit_idx)}"
+                        ]
+                    })
+
+                    # Generate Excel workbook in memory
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        df_summary_export.to_excel(writer, sheet_name='Executive Summary', index=False)
+                        df_forecast_export.to_excel(writer, sheet_name='Monthly Forecast', index=False)
+                    
+                    excel_data = excel_buffer.getvalue()
+
+                    # Download button
+                    st.download_button(
+                        label="📥 Download Complete Forecast Analysis (Excel)",
+                        data=excel_data,
+                        file_name="Gas_Well_Forecast_and_Workover_Analysis.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
 
                     # CHART 1: Production Rate vs Critical Rates
                     fig_rate = go.Figure()
