@@ -58,10 +58,10 @@ def parse_robust_dates(series):
     return pd.to_datetime(series, errors='coerce')
 
 def clean_numeric(series):
-    """Converts numbers to floats, mapping dashes, blanks, and text strings to NaN."""
+    """Converts numbers to floats, mapping dashes and missing text to 0.0 to keep date continuity."""
     cleaned = series.astype(str).str.replace(',', '', regex=False).str.strip()
-    cleaned = cleaned.replace(['-', '--', 'N/A', 'nan', 'none', 'None', ''], np.nan)
-    return pd.to_numeric(cleaned, errors='coerce')
+    cleaned = cleaned.replace(['-', '--', 'N/A', 'nan', 'none', 'None', ''], '0')
+    return pd.to_numeric(cleaned, errors='coerce').fillna(0.0)
 
 uploaded_file = st.file_uploader("Upload Historical Well Data (Excel)", type=["xlsx", "xls"])
 
@@ -115,24 +115,24 @@ if uploaded_file is not None:
             df['Pwh'] = clean_numeric(df_raw[pwh_col])
             df['Pfl'] = clean_numeric(df_raw[pfl_col])
             
-            # Neglect rows with non-numeric text or missing data
-            df = df.dropna(subset=['Date', 'Gas_Rate', 'Pwh', 'Pfl']).sort_values('Date').reset_index(drop=True)
+            # Keep all valid dates so the entire timeline (including shut-in periods) is preserved
+            df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
             
             if len(df) < 3:
-                st.error("Not enough valid numeric data rows found. Ensure parameters contain valid numbers.")
+                st.error("Not enough valid date rows found in the uploaded file.")
             else:
-                # Historical Cumulative Production Calculation
+                # Historical Cumulative Production Calculation (includes full timeline)
                 df['Days_Step'] = df['Date'].diff().dt.total_seconds() / (24 * 3600)
                 df['Days_Step'] = df['Days_Step'].fillna(1.0)
                 hist_cum_mmscf = (df['Gas_Rate'] * df['Days_Step']).sum()
 
-                # Filter strictly positive active data for DCA fitting & forecasting
+                # Filter strictly positive active data for DCA fitting
                 df_active = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
                 
                 if len(df_active) < 3:
-                    st.error("Not enough positive gas production data rows found.")
+                    st.error("Not enough positive gas production data rows found for DCA fitting.")
                 else:
-                    # Decline Curve Fitting
+                    # Decline Curve Fitting on active months only
                     df_monthly = df_active.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean', 'Pfl': 'mean'}).dropna().reset_index()
                     fit_df = df_monthly if len(df_monthly) >= 3 else df_active
                     
@@ -160,7 +160,7 @@ if uploaded_file is not None:
 
                     st.success(f"DCA Parameters Calculated: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                    # Project 60 months forward to evaluate limits
+                    # Project 60 months forward from the last historical date
                     future_months = 60
                     last_historical_date = df['Date'].iloc[-1]
                     future_t = np.arange(1, future_months + 1)
@@ -193,7 +193,7 @@ if uploaded_file is not None:
                         else:
                             forecast_qc_wo.append(None)
 
-                    # Exact Workover Date Calculations
+                    # Plotting Arrays & Seamless Workover Date Interpolation
                     plot_dates = [last_historical_date] + forecast_dates
                     plot_qg = [qi_last] + list(forecast_qg)
                     plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
@@ -258,7 +258,7 @@ if uploaded_file is not None:
                     wo_total_cum = hist_cum_mmscf + wo_forecast_cum
                     incremental_gain = wo_total_cum - base_total_cum
 
-                    # Display Summary Metrics (Now includes Critical Rates)
+                    # Summary Metrics Dashboard
                     st.subheader("📊 Total Lifetime Cumulative Production & Critical Rates")
                     metric_col1, metric_col2, metric_col3 = st.columns(3)
                     
@@ -326,12 +326,9 @@ if uploaded_file is not None:
                         use_container_width=True
                     )
 
-                    # Filter zero production rows for historical plotting
-                    df_hist_plot = df[df['Gas_Rate'] > 0].copy()
-
-                    # CHART 1: Production Rate vs Critical Rates
+                    # CHART 1: Production Rate vs Critical Rates (Plots full df including 2018-2026 zeroes)
                     fig_rate = go.Figure()
-                    fig_rate.add_trace(go.Scatter(x=df_hist_plot['Date'], y=df_hist_plot['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
+                    fig_rate.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
                     fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
                     
                     if base_limit_idx < future_months:
@@ -350,7 +347,7 @@ if uploaded_file is not None:
                     fig_rate.update_layout(title="1. Production Rate Forecast vs. Critical Gas Rates", xaxis_title="Date", yaxis_title="Gas Rate (MMscfd)", template="plotly_dark", hovermode="x unified")
                     st.plotly_chart(fig_rate, use_container_width=True)
 
-                    # CHART 2: Wellhead Pressure vs Flowline Pressure
+                    # CHART 2: Wellhead Pressure vs Flowline Pressure (Plots full df timeline)
                     fig_pres = go.Figure()
                     fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pwh'], mode='lines', name='Historical Pwh', line=dict(color='#3498db', dash='dot')))
                     fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pfl'], mode='lines', name='Historical Pfl', line=dict(color='#e67e22', dash='dot')))
