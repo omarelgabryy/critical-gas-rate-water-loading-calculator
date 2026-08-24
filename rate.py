@@ -94,30 +94,29 @@ if uploaded_file is not None:
     with col_map3:
         pwh_col = st.selectbox("Wellhead Pressure Column", available_cols, index=default_pwh)
 
-    # Interactive slider allowing forecasts from 1 to 20 years into the future
-    future_months = st.slider("Forecast Horizon (Months)", min_value=12, max_value=240, value=120, step=12)
+    future_months = st.slider("Forecast Horizon (Months)", min_value=12, max_value=240, value=60, step=12)
 
     if st.button("Run Decline & Forecast Analysis"):
         try:
-            df = pd.DataFrame()
-            df['Date'] = parse_robust_dates(df_raw[date_col])
-            df['Gas_Rate'] = pd.to_numeric(df_raw[gas_col], errors='coerce')
-            df['Pwh'] = pd.to_numeric(df_raw[pwh_col], errors='coerce')
+            # Full dataset preserved for plotting history (including zero-rate shut-in periods)
+            df_full = pd.DataFrame()
+            df_full['Date'] = parse_robust_dates(df_raw[date_col])
+            df_full['Gas_Rate'] = pd.to_numeric(df_raw[gas_col], errors='coerce').fillna(0.0)
+            df_full['Pwh'] = pd.to_numeric(df_raw[pwh_col], errors='coerce').replace(0, np.nan).ffill().bfill()
             
-            # Clean missing dates and filter non-producing shut-in rows
-            df = df.dropna(subset=['Date', 'Gas_Rate']).sort_values('Date').reset_index(drop=True)
-            df = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
-            df['Pwh'] = df['Pwh'].replace(0, np.nan).ffill().bfill()
+            df_full = df_full.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
+
+            # Filtered dataset strictly for DCA Curve Fitting (Active production > 0)
+            df_active = df_full[df_full['Gas_Rate'] > 0].copy().reset_index(drop=True)
             
-            if len(df) < 3:
-                st.error("Not enough valid producing data rows found under selected columns.")
+            if len(df_active) < 3:
+                st.error("Not enough active production data (> 0 rate) found to fit a decline curve.")
             else:
-                # Resample scatter/daily data to Monthly averages
-                df_monthly = df.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean'}).dropna().reset_index()
+                # Monthly resampling on active production
+                df_monthly = df_active.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean'}).dropna().reset_index()
+                fit_df = df_monthly if len(df_monthly) >= 3 else df_active
                 
-                fit_df = df_monthly if len(df_monthly) >= 3 else df
-                
-                # Fit Arps curve from Peak Production rate onwards
+                # Fit Arps from Peak Production rate onwards
                 peak_idx = fit_df['Gas_Rate'].idxmax()
                 df_decline = fit_df.iloc[peak_idx:].copy().reset_index(drop=True)
                 
@@ -127,7 +126,6 @@ if uploaded_file is not None:
                 df_decline['Months'] = (df_decline['Date'] - df_decline['Date'].iloc[0]).dt.days / 30.4375
                 qi_peak = float(df_decline['Gas_Rate'].iloc[0])
                 
-                # Fit Arps with lower bounds to avoid flatlines
                 try:
                     popt, _ = curve_fit(
                         arps_hyperbolic, 
@@ -140,16 +138,17 @@ if uploaded_file is not None:
                 except Exception:
                     fit_Di, fit_b = 0.02, 0.5
 
-                # Linear regression for pressure drop
                 p_fit = np.polyfit(fit_df.index, fit_df['Pwh'], 1)
                 monthly_dP = max(-p_fit[0], 0.0)
                 
-                qi_last = float(df['Gas_Rate'].iloc[-1])
-                last_Pwh_psig = float(df['Pwh'].iloc[-1])
+                # Starting rate (qi) = Last known active production rate before shut-in
+                qi_last = float(df_active['Gas_Rate'].iloc[-1])
+                last_Pwh_psig = float(df_active['Pwh'].iloc[-1])
 
                 st.success(f"Calculated Parameters: Decline = {fit_Di*12*100:.1f}%/yr | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                # Project forward based on selected slider horizon
+                # Forecast from the LATEST date in the full Excel sheet forward
+                latest_date = df_full['Date'].iloc[-1]
                 future_t = np.arange(1, future_months + 1)
                 
                 forecast_qg = arps_hyperbolic(future_t, qi_last, fit_Di, fit_b)
@@ -164,7 +163,7 @@ if uploaded_file is not None:
                     qc = (3.066894 * P_psia * vc * area) / (temp_r * z_factor)
                     forecast_qc.append(qc)
 
-                forecast_dates = [df['Date'].iloc[-1] + pd.DateOffset(months=i) for i in range(1, future_months + 1)]
+                forecast_dates = [latest_date + pd.DateOffset(months=i) for i in range(1, future_months + 1)]
 
                 loading_month = None
                 for i in range(future_months):
@@ -177,9 +176,9 @@ if uploaded_file is not None:
                 else:
                     st.info(f"✅ Well is projected to remain above the critical rate for the next {future_months} months.")
 
-                # Plotly Visualization
+                # Plotly Visualization showing FULL history (including shut-in zeros up to 2026)
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
+                fig.add_trace(go.Scatter(x=df_full['Date'], y=df_full['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
                 fig.add_trace(go.Scatter(x=forecast_dates, y=forecast_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
                 fig.add_trace(go.Scatter(x=forecast_dates, y=forecast_qc, mode='lines', name='Critical Rate Threshold (qc)', line=dict(color='#e74c3c', width=2, dash='dash')))
 
