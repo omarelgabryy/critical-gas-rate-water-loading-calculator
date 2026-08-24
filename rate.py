@@ -46,11 +46,22 @@ if st.button("Calculate Critical Rate", type="primary", use_container_width=True
 st.divider()
 st.subheader("📈 Historical Data Upload & Forecast")
 
-def arps_hyperbolic(t, qi, Di, b):
-    return qi / ((1 + b * Di * t) ** (1 / b))
-
-uploaded_file = st.file_uploader("Upload Historical Well Data (Excel)", type=["xlsx", "xls"])
-
+@st.cache_data
+def load_and_clean_data(file_path):
+    df = pd.read_excel(file_path, sheet_name="Sheet1")
+    
+    date_col = df.columns[0]
+    gas_col = 'FN' if 'FN' in df.columns else df.columns[1]
+    
+    # Cleaning invalid values & formulas (#REF!, '217-181', zeroes)
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    df[gas_col] = pd.to_numeric(df[gas_col], errors='coerce')
+    
+    df_clean = df.dropna(subset=[date_col, gas_col]).copy()
+    df_clean = df_clean[df_clean[gas_col] > 0]
+    df_clean = df_clean.sort_values(by=date_col)
+    
+    return df_clean, date_col, gas_col
 if uploaded_file is not None:
     # Header row selector in case column headers are not in Row 1
     header_row = st.number_input("Header Row (Set to row number where column names are located)", min_value=1, value=1, step=1) - 1
