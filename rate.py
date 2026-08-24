@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import math
 import io
-import re
 from scipy.optimize import curve_fit
 import plotly.graph_objects as go
 
@@ -59,11 +58,14 @@ def parse_robust_dates(series):
     return pd.to_datetime(series, errors='coerce')
 
 def clean_numeric(series):
-    """Parses numeric values from messy strings, units, European decimals, and spaces."""
+    """Safely extracts numeric values handling floats, NaNs, strings, units, and European separators."""
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors='coerce')
+    
     s = series.astype(str).str.strip()
     s = s.str.replace('\xa0', '', regex=False)
-    s = s.apply(lambda x: re.sub(r'(?<=\d)\s+(?=\d)', '', x))
-    s = s.apply(lambda x: re.sub(r'^(\d+),(\d{1,3})$', r'\1.\2', x))
+    s = s.str.replace(r'(?<=\d)\s+(?=\d)', '', regex=True)
+    s = s.str.replace(r'^(\d+),(\d{1,3})$', r'\1.\2', regex=True)
     s = s.str.replace(',', '', regex=False)
     extracted = s.str.extract(r'([-+]?\d*\.?\d+)')[0]
     return pd.to_numeric(extracted, errors='coerce')
@@ -77,7 +79,7 @@ if uploaded_file is not None:
     sheet_name = st.selectbox("Select Sheet", excel_file.sheet_names)
     
     df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
-    df_raw.columns = df_raw.columns.astype(str).str.strip()
+    df_raw.columns = [str(col).strip() for col in df_raw.columns]
     available_cols = list(df_raw.columns)
     
     st.markdown("**1. Map Excel Columns:**")
@@ -120,7 +122,7 @@ if uploaded_file is not None:
             df['Pwh'] = clean_numeric(df_raw[pwh_col])
             df['Pfl'] = clean_numeric(df_raw[pfl_col])
             
-            # Clean invalid/unparseable rows without converting them to zero
+            # Clean invalid/unparseable rows safely
             df = df.dropna(subset=['Date', 'Gas_Rate']).sort_values('Date').reset_index(drop=True)
             
             if len(df) < 3:
@@ -320,7 +322,7 @@ if uploaded_file is not None:
                         use_container_width=True
                     )
 
-                    # Historical data plot filtering non-zero production rows cleanly
+                    # Filter out non-production shut-in days cleanly for historical curve plotting
                     df_hist_plot = df[df['Gas_Rate'] > 0].copy()
 
                     # CHART 1: Production Rate vs Critical Rates
