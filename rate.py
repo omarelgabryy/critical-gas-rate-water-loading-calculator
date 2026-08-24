@@ -97,7 +97,7 @@ if uploaded_file is not None:
             index=1
         )
     with col_wo2:
-        workover_date_input = st.date_input("Planned Workover Execution Date", value=date(2026, 9, 1))
+        workover_date_input = st.date_input("Planned Workover Execution Date", value=date(2026, 8, 1))
 
     if st.button("Run Schedule & Generate Forecast Table", type="primary"):
         try:
@@ -146,7 +146,7 @@ if uploaded_file is not None:
                     qi_last = float(df_active['Gas_Rate'].iloc[-1])
                     last_Pwh_psig = float(df_active['Pwh'].iloc[-1])
                     last_Pfl_psig = float(df_active['Pfl'].iloc[-1])
-                    last_historical_date = df['Date'].iloc[-1]
+                    last_historical_date = df_active['Date'].iloc[-1]
                     
                     wo_dt = pd.Timestamp(workover_date_input)
 
@@ -224,9 +224,17 @@ if uploaded_file is not None:
                     fig_rate.add_trace(go.Scatter(x=df_forecast_table['Date'], y=df_forecast_table['Gas Rate qg (MMscfd)'], mode='lines', name='Forecast Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
                     fig_rate.add_trace(go.Scatter(x=df_forecast_table['Date'], y=df_forecast_table['Critical Rate qc (MMscfd)'], mode='lines', name='Active Critical Rate (qc)', line=dict(color='#e74c3c', width=2, dash='dash')))
 
-                    # Add workover marker line
+                    # Fixed Plotly annotation styling
                     fig_rate.add_vline(x=wo_dt.timestamp() * 1000, line_width=2, line_dash="dash", line_color="gold")
-                    fig_rate.add_annotation(x=wo_dt, y=df_active['Gas_Rate'].max(), text=f"Workover ({wo_tubing}\")", showarrow=True, arrowhead=1, color="gold")
+                    fig_rate.add_annotation(
+                        x=wo_dt, 
+                        y=df_active['Gas_Rate'].max(), 
+                        text=f"Workover ({wo_tubing}\")", 
+                        showarrow=True, 
+                        arrowhead=1, 
+                        font=dict(color="gold"),
+                        arrowcolor="gold"
+                    )
 
                     fig_rate.update_layout(
                         title="Dynamic Production Rate Forecast & Workover Critical Rates",
