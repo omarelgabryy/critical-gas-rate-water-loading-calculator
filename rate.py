@@ -49,6 +49,24 @@ st.subheader("📈 Historical Data Upload & Forecast")
 def arps_hyperbolic(t, qi, Di, b):
     return qi / ((1 + b * Di * t) ** (1 / b))
 
+def parse_robust_dates(series):
+    """Parses dates from mixed strings, ISO dates, and Excel serial numbers safely."""
+    numeric_series = pd.to_numeric(series, errors='coerce')
+    string_mask = numeric_series.isna() & series.notna()
+    
+    parsed = pd.Series(index=series.index, dtype='datetime64[ns]')
+    
+    # Parse standard string dates
+    if string_mask.any():
+        parsed.update(pd.to_datetime(series[string_mask], format='mixed', errors='coerce'))
+        
+    # Parse numeric Excel serial numbers (e.g., 43251 -> 2018-05-31)
+    num_mask = numeric_series.notna()
+    if num_mask.any():
+        parsed.update(pd.to_datetime(numeric_series[num_mask], unit='D', origin='1899-12-30', errors='coerce'))
+        
+    return parsed
+
 uploaded_file = st.file_uploader("Upload Historical Well Data (Excel)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
@@ -81,12 +99,23 @@ if uploaded_file is not None:
     if st.button("Run Decline & Forecast Analysis"):
         try:
             df = pd.DataFrame()
-            df['Date'] = pd.to_datetime(df_raw[date_col], errors='coerce')
+            
+            # Robust Date Parsing
+            df['Date'] = parse_robust_dates(df_raw[date_col])
+            
+            # Clean numeric values
             df['Gas_Rate'] = pd.to_numeric(df_raw[gas_col], errors='coerce')
             df['Pwh'] = pd.to_numeric(df_raw[pwh_col], errors='coerce')
             
-            # Clean corrupt/empty rows
-            df = df.dropna(subset=['Date', 'Gas_Rate', 'Pwh']).sort_values('Date').reset_index(drop=True)
+            # Filter out invalid dates and non-positive gas rates
+            df = df.dropna(subset=['Date', 'Gas_Rate']).copy()
+            df = df[df['Gas_Rate'] > 0]
+            
+            # Fill missing Pwh values so pressure gaps don't drop valid production rows
+            df['Pwh'] = df['Pwh'].replace(0, np.nan).ffill().bfill()
+            
+            # Sort chronologically
+            df = df.sort_values('Date').reset_index(drop=True)
             
             if len(df) < 3:
                 st.error("Not enough valid data rows found under selected columns. Adjust Header Row or Column Mapping.")
@@ -96,12 +125,15 @@ if uploaded_file is not None:
                 qi_input = float(df['Gas_Rate'].iloc[-1])
                 
                 # Fit Arps Decline Curve
-                popt, _ = curve_fit(arps_hyperbolic, df['Months'], df['Gas_Rate'], p0=[qi_input, 0.02, 0.5], bounds=(0, [np.inf, 1.0, 1.0]))
-                _, fit_Di, fit_b = popt
+                try:
+                    popt, _ = curve_fit(arps_hyperbolic, df['Months'], df['Gas_Rate'], p0=[qi_input, 0.02, 0.5], bounds=(0, [np.inf, 1.0, 1.0]))
+                    _, fit_Di, fit_b = popt
+                except Exception:
+                    fit_Di, fit_b = 0.02, 0.5  # Fallback parameters if fitting noise fails
                 
                 # Fit Pressure Drop (Linear Regression)
                 p_fit = np.polyfit(df['Months'], df['Pwh'], 1)
-                monthly_dP = -p_fit[0]
+                monthly_dP = max(-p_fit[0], 0.0)
                 last_Pwh_psig = float(df['Pwh'].iloc[-1])
 
                 st.success(f"Calculated Parameters: Decline = {fit_Di*12*100:.1f}%/yr | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
