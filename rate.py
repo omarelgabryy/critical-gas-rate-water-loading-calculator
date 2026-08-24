@@ -49,10 +49,27 @@ st.subheader("📈 Historical Data Upload & Forecast")
 def arps_hyperbolic(t, qi, Di, b):
     return qi / ((1 + b * Di * t) ** (1 / b))
 
+def parse_robust_dates(series):
+    """Parses native datetimes, string dates, and Excel serial numbers safely."""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return pd.to_datetime(series, errors='coerce')
+    
+    num_series = pd.to_numeric(series, errors='coerce')
+    parsed = pd.Series(index=series.index, dtype='datetime64[ns]')
+    
+    excel_mask = num_series.notna() & (num_series > 1000) & (num_series < 100000)
+    if excel_mask.any():
+        parsed.update(pd.to_datetime(num_series[excel_mask], unit='D', origin='1899-12-30', errors='coerce'))
+        
+    str_mask = parsed.isna() & series.notna()
+    if str_mask.any():
+        parsed.update(pd.to_datetime(series[str_mask], format='mixed', errors='coerce'))
+        
+    return parsed
+
 uploaded_file = st.file_uploader("Upload Historical Well Data (Excel)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
-    # Header row selector in case column headers are not in Row 1
     header_row = st.number_input("Header Row (Set to row number where column names are located)", min_value=1, value=1, step=1) - 1
     
     excel_file = pd.ExcelFile(uploaded_file)
@@ -66,7 +83,6 @@ if uploaded_file is not None:
     st.markdown("**Map Excel Columns:**")
     col_map1, col_map2, col_map3 = st.columns(3)
     
-    # Auto-detect best guesses for columns
     default_date = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['date', 'time', 'timestamp'])), 0)
     default_gas = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['gas', 'qg', 'rate'])), min(1, len(available_cols)-1))
     default_pwh = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['pwh', 'pressure', 'pres'])), min(2, len(available_cols)-1))
@@ -81,17 +97,23 @@ if uploaded_file is not None:
     if st.button("Run Decline & Forecast Analysis"):
         try:
             df = pd.DataFrame()
-            df['Date'] = pd.to_datetime(df_raw[date_col], errors='coerce')
+            df['Date'] = parse_robust_dates(df_raw[date_col])
             df['Gas_Rate'] = pd.to_numeric(df_raw[gas_col], errors='coerce')
             df['Pwh'] = pd.to_numeric(df_raw[pwh_col], errors='coerce')
             
-            # Clean corrupt/empty rows
-            df = df.dropna(subset=['Date', 'Gas_Rate', 'Pwh']).sort_values('Date').reset_index(drop=True)
+            # 1. Clean missing dates and gas rates
+            df = df.dropna(subset=['Date', 'Gas_Rate']).sort_values('Date').reset_index(drop=True)
+            
+            # 2. CRITICAL FIX: Filter out non-producing/zero-rate shut-in tail rows
+            df = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
+            
+            # 3. Handle pressure zeros/missing values by forward filling
+            df['Pwh'] = df['Pwh'].replace(0, np.nan).ffill().bfill()
             
             if len(df) < 3:
-                st.error("Not enough valid data rows found under selected columns. Adjust Header Row or Column Mapping.")
+                st.error("Not enough valid producing data rows found under selected columns.")
             else:
-                # Convert time index to months
+                # Convert time index to months relative to start
                 df['Months'] = (df['Date'] - df['Date'].iloc[0]).dt.days / 30.4375
                 qi_input = float(df['Gas_Rate'].iloc[-1])
                 
@@ -99,14 +121,14 @@ if uploaded_file is not None:
                 popt, _ = curve_fit(arps_hyperbolic, df['Months'], df['Gas_Rate'], p0=[qi_input, 0.02, 0.5], bounds=(0, [np.inf, 1.0, 1.0]))
                 _, fit_Di, fit_b = popt
                 
-                # Fit Pressure Drop (Linear Regression)
+                # Fit Linear Pressure Drop
                 p_fit = np.polyfit(df['Months'], df['Pwh'], 1)
-                monthly_dP = -p_fit[0]
+                monthly_dP = max(-p_fit[0], 0.0)
                 last_Pwh_psig = float(df['Pwh'].iloc[-1])
 
                 st.success(f"Calculated Parameters: Decline = {fit_Di*12*100:.1f}%/yr | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                # Forecast 36 Months
+                # Forecast 36 Months from the last producing month
                 future_months = 36
                 future_t = np.arange(1, future_months + 1)
                 
@@ -124,7 +146,6 @@ if uploaded_file is not None:
 
                 forecast_dates = [df['Date'].iloc[-1] + pd.DateOffset(months=i) for i in range(1, future_months + 1)]
 
-                # Find Intersection Point
                 loading_month = None
                 for i in range(future_months):
                     if forecast_qg[i] <= forecast_qc[i]:
