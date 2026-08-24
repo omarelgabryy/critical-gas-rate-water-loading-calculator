@@ -53,7 +53,7 @@ def parse_robust_dates(series):
     return pd.to_datetime(series, errors='coerce')
 
 def clean_numeric(series):
-    """Converts strings like 'S.I', blanks, or formatted text into numeric floats."""
+    """Converts numbers to floats and coerces any text or non-numeric strings to NaN."""
     cleaned = series.astype(str).str.replace(',', '', regex=False).str.strip()
     return pd.to_numeric(cleaned, errors='coerce')
 
@@ -92,145 +92,141 @@ if uploaded_file is not None:
         try:
             df = pd.DataFrame()
             df['Date'] = parse_robust_dates(df_raw[date_col])
-            df['Gas_Rate'] = clean_numeric(df_raw[gas_col]).fillna(0.0) # S.I becomes 0.0
+            df['Gas_Rate'] = clean_numeric(df_raw[gas_col])
             df['Pwh'] = clean_numeric(df_raw[pwh_col])
             df['Pfl'] = clean_numeric(df_raw[pfl_col])
             
-            # Clean invalid dates and sort chronologically
-            df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
-            df['Pwh'] = df['Pwh'].replace(0, np.nan).ffill().bfill()
-            df['Pfl'] = df['Pfl'].replace(0, np.nan).ffill().bfill()
+            # Neglect/drop any row containing text, missing values, or non-numeric strings
+            df = df.dropna(subset=['Date', 'Gas_Rate', 'Pwh', 'Pfl']).sort_values('Date').reset_index(drop=True)
             
-            # Remove trailing blank/shut-in rows beyond last production date
-            active_mask = df['Gas_Rate'] > 0
-            if not active_mask.any():
-                st.error("No positive gas rate data found in the selected gas column.")
+            if len(df) < 3:
+                st.error("Not enough valid numeric data rows found. Ensure parameters contain valid numbers.")
             else:
-                last_active_index = active_mask.iloc[::-1].idxmax()
-                df = df.iloc[:last_active_index + 1].copy().reset_index(drop=True)
-
-                # Filter active production days for DCA curve fitting
+                # Active production rows (Gas_Rate > 0)
                 df_active = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
                 
-                # Monthly aggregation
-                df_monthly = df_active.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean', 'Pfl': 'mean'}).dropna().reset_index()
-                fit_df = df_monthly if len(df_monthly) >= 3 else df_active
-                
-                # Fit Arps Decline Curve
-                peak_idx = fit_df['Gas_Rate'].idxmax()
-                df_decline = fit_df.iloc[peak_idx:].copy().reset_index(drop=True)
-                if len(df_decline) < 3:
-                    df_decline = fit_df.copy().reset_index(drop=True)
-
-                df_decline['Months'] = (df_decline['Date'] - df_decline['Date'].iloc[0]).dt.days / 30.4375
-                qi_peak = float(df_decline['Gas_Rate'].iloc[0])
-                
-                try:
-                    popt, _ = curve_fit(
-                        arps_hyperbolic, 
-                        df_decline['Months'], 
-                        df_decline['Gas_Rate'], 
-                        p0=[qi_peak, 0.02, 0.5], 
-                        bounds=([0, 0.001, 0.01], [np.inf, 1.0, 1.0])
-                    )
-                    _, fit_Di, fit_b = popt
-                except Exception:
-                    fit_Di, fit_b = 0.02, 0.5
-
-                # Linear regression for Wellhead Pressure drop rate
-                p_fit = np.polyfit(fit_df.index, fit_df['Pwh'], 1)
-                monthly_dP = max(-p_fit[0], 0.0)
-                
-                qi_last = float(df_active['Gas_Rate'].iloc[-1])
-                last_Pwh_psig = float(df_active['Pwh'].iloc[-1])
-                last_Pfl_psig = float(df_active['Pfl'].iloc[-1])
-
-                st.success(f"Parameters: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
-
-                # Project 36 months forward
-                future_months = 36
-                last_historical_date = df['Date'].iloc[-1]
-                future_t = np.arange(1, future_months + 1)
-                
-                forecast_qg = arps_hyperbolic(future_t, qi_last, fit_Di, fit_b)
-                forecast_Pwh_psig = np.maximum(last_Pwh_psig - (monthly_dP * future_t), 0.0)
-                forecast_Pfl_psig = np.full(future_months, last_Pfl_psig)
-                
-                forecast_Pwh_psia = forecast_Pwh_psig + 14.7
-                forecast_qc = []
-                for P_psia in forecast_Pwh_psia:
-                    temp_r = temp_f + 459.67
-                    area = math.pi * ((tubing_id / 2.0) / 12.0)**2
-                    vc = (1.9116 * (60.0 * (water_density - gas_density))**0.25) / (gas_density**0.5)
-                    qc = (3.066894 * P_psia * vc * area) / (temp_r * z_factor)
-                    forecast_qc.append(qc)
-
-                forecast_dates = [last_historical_date + pd.DateOffset(months=i) for i in range(1, future_months + 1)]
-
-                # Build seamless continuity arrays
-                plot_dates = [last_historical_date] + forecast_dates
-                plot_qg = [qi_last] + list(forecast_qg)
-                plot_qc = [forecast_qc[0]] + list(forecast_qc)
-                plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
-                plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
-
-                # Find Limit Months
-                loading_month = None
-                pressure_limit_month = None
-
-                for i in range(future_months):
-                    if loading_month is None and forecast_qg[i] <= forecast_qc[i]:
-                        loading_month = forecast_dates[i].strftime("%B %Y")
+                if len(df_active) < 3:
+                    st.error("Not enough positive gas production data rows found.")
+                else:
+                    # Monthly aggregation
+                    df_monthly = df_active.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean', 'Pfl': 'mean'}).dropna().reset_index()
+                    fit_df = df_monthly if len(df_monthly) >= 3 else df_active
                     
-                    if pressure_limit_month is None and forecast_Pwh_psig[i] <= forecast_Pfl_psig[i]:
-                        pressure_limit_month = forecast_dates[i].strftime("%B %Y")
+                    # Fit Arps Decline Curve
+                    peak_idx = fit_df['Gas_Rate'].idxmax()
+                    df_decline = fit_df.iloc[peak_idx:].copy().reset_index(drop=True)
+                    if len(df_decline) < 3:
+                        df_decline = fit_df.copy().reset_index(drop=True)
 
-                # --- INSIGHTS & WARNINGS ---
-                st.subheader("📋 Well Operating Limits Summary")
-                res_col1, res_col2 = st.columns(2)
-                
-                with res_col1:
-                    if loading_month:
-                        st.warning(f"⚠️ **Liquid Loading Limit:**\nExpected around **{loading_month}**.")
-                    else:
-                        st.success(f"✅ **Liquid Loading:**\nAbove critical rate for >36 months.")
+                    df_decline['Months'] = (df_decline['Date'] - df_decline['Date'].iloc[0]).dt.days / 30.4375
+                    qi_peak = float(df_decline['Gas_Rate'].iloc[0])
+                    
+                    try:
+                        popt, _ = curve_fit(
+                            arps_hyperbolic, 
+                            df_decline['Months'], 
+                            df_decline['Gas_Rate'], 
+                            p0=[qi_peak, 0.02, 0.5], 
+                            bounds=([0, 0.001, 0.01], [np.inf, 1.0, 1.0])
+                        )
+                        _, fit_Di, fit_b = popt
+                    except Exception:
+                        fit_Di, fit_b = 0.02, 0.5
 
-                with res_col2:
-                    if pressure_limit_month:
-                        st.error(f"🛑 **Min Flowline Pressure Limit:**\n$P_{{wh}} \\le P_{{fl}}$ around **{pressure_limit_month}**.")
-                    else:
-                        st.success(f"✅ **Flowline Pressure:**\n$P_{{wh}}$ remains above $P_{{fl}}$ for >36 months.")
+                    # Linear regression for Wellhead Pressure drop rate
+                    p_fit = np.polyfit(fit_df.index, fit_df['Pwh'], 1)
+                    monthly_dP = max(-p_fit[0], 0.0)
+                    
+                    qi_last = float(df_active['Gas_Rate'].iloc[-1])
+                    last_Pwh_psig = float(df_active['Pwh'].iloc[-1])
+                    last_Pfl_psig = float(df_active['Pfl'].iloc[-1])
 
-                # --- VISUALIZATION 1: GAS RATE VS CRITICAL RATE ---
-                fig_rate = go.Figure()
-                fig_rate.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
-                fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
-                fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc, mode='lines', name='Critical Rate Threshold (qc)', line=dict(color='#e74c3c', width=2, dash='dash')))
+                    st.success(f"Parameters: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                fig_rate.update_layout(
-                    title="1. Production Rate Forecast vs. Critical Rate (Liquid Loading)",
-                    xaxis_title="Date",
-                    yaxis_title="Gas Rate (MMscfd)",
-                    template="plotly_dark",
-                    hovermode="x unified"
-                )
-                st.plotly_chart(fig_rate, use_container_width=True)
+                    # Project 36 months forward
+                    future_months = 36
+                    last_historical_date = df['Date'].iloc[-1]
+                    future_t = np.arange(1, future_months + 1)
+                    
+                    forecast_qg = arps_hyperbolic(future_t, qi_last, fit_Di, fit_b)
+                    forecast_Pwh_psig = np.maximum(last_Pwh_psig - (monthly_dP * future_t), 0.0)
+                    forecast_Pfl_psig = np.full(future_months, last_Pfl_psig)
+                    
+                    forecast_Pwh_psia = forecast_Pwh_psig + 14.7
+                    forecast_qc = []
+                    for P_psia in forecast_Pwh_psia:
+                        temp_r = temp_f + 459.67
+                        area = math.pi * ((tubing_id / 2.0) / 12.0)**2
+                        vc = (1.9116 * (60.0 * (water_density - gas_density))**0.25) / (gas_density**0.5)
+                        qc = (3.066894 * P_psia * vc * area) / (temp_r * z_factor)
+                        forecast_qc.append(qc)
 
-                # --- VISUALIZATION 2: WELLHEAD PRESSURE VS FLOWLINE PRESSURE ---
-                fig_pres = go.Figure()
-                fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pwh'], mode='lines', name='Historical Pwh', line=dict(color='#3498db', dash='dot')))
-                fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pfl'], mode='lines', name='Historical Pfl', line=dict(color='#e67e22', dash='dot')))
-                fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pwh, mode='lines', name='Forecasted Pwh', line=dict(color='#00bc8c', width=3)))
-                fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pfl, mode='lines', name='Flowline Pressure Limit (Pfl)', line=dict(color='#e74c3c', width=2, dash='dash')))
+                    forecast_dates = [last_historical_date + pd.DateOffset(months=i) for i in range(1, future_months + 1)]
 
-                fig_pres.update_layout(
-                    title="2. Wellhead Pressure (Pwh) Forecast vs. Flowline Pressure Limit (Pfl)",
-                    xaxis_title="Date",
-                    yaxis_title="Pressure (psig)",
-                    template="plotly_dark",
-                    hovermode="x unified"
-                )
-                st.plotly_chart(fig_pres, use_container_width=True)
+                    # Build seamless continuity arrays
+                    plot_dates = [last_historical_date] + forecast_dates
+                    plot_qg = [qi_last] + list(forecast_qg)
+                    plot_qc = [forecast_qc[0]] + list(forecast_qc)
+                    plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
+                    plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
+
+                    # Find Limit Months
+                    loading_month = None
+                    pressure_limit_month = None
+
+                    for i in range(future_months):
+                        if loading_month is None and forecast_qg[i] <= forecast_qc[i]:
+                            loading_month = forecast_dates[i].strftime("%B %Y")
+                        
+                        if pressure_limit_month is None and forecast_Pwh_psig[i] <= forecast_Pfl_psig[i]:
+                            pressure_limit_month = forecast_dates[i].strftime("%B %Y")
+
+                    # --- INSIGHTS & WARNINGS ---
+                    st.subheader("📋 Well Operating Limits Summary")
+                    res_col1, res_col2 = st.columns(2)
+                    
+                    with res_col1:
+                        if loading_month:
+                            st.warning(f"⚠️ **Liquid Loading Limit:**\nExpected around **{loading_month}**.")
+                        else:
+                            st.success(f"✅ **Liquid Loading:**\nAbove critical rate for >36 months.")
+
+                    with res_col2:
+                        if pressure_limit_month:
+                            st.error(f"🛑 **Min Flowline Pressure Limit:**\n$P_{{wh}} \\le P_{{fl}}$ around **{pressure_limit_month}**.")
+                        else:
+                            st.success(f"✅ **Flowline Pressure:**\n$P_{{wh}}$ remains above $P_{{fl}}$ for >36 months.")
+
+                    # --- VISUALIZATION 1: GAS RATE VS CRITICAL RATE ---
+                    fig_rate = go.Figure()
+                    fig_rate.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
+                    fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
+                    fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc, mode='lines', name='Critical Rate Threshold (qc)', line=dict(color='#e74c3c', width=2, dash='dash')))
+
+                    fig_rate.update_layout(
+                        title="1. Production Rate Forecast vs. Critical Rate (Liquid Loading)",
+                        xaxis_title="Date",
+                        yaxis_title="Gas Rate (MMscfd)",
+                        template="plotly_dark",
+                        hovermode="x unified"
+                    )
+                    st.plotly_chart(fig_rate, use_container_width=True)
+
+                    # --- VISUALIZATION 2: WELLHEAD PRESSURE VS FLOWLINE PRESSURE ---
+                    fig_pres = go.Figure()
+                    fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pwh'], mode='lines', name='Historical Pwh', line=dict(color='#3498db', dash='dot')))
+                    fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pfl'], mode='lines', name='Historical Pfl', line=dict(color='#e67e22', dash='dot')))
+                    fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pwh, mode='lines', name='Forecasted Pwh', line=dict(color='#00bc8c', width=3)))
+                    fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pfl, mode='lines', name='Flowline Pressure Limit (Pfl)', line=dict(color='#e74c3c', width=2, dash='dash')))
+
+                    fig_pres.update_layout(
+                        title="2. Wellhead Pressure (Pwh) Forecast vs. Flowline Pressure Limit (Pfl)",
+                        xaxis_title="Date",
+                        yaxis_title="Pressure (psig)",
+                        template="plotly_dark",
+                        hovermode="x unified"
+                    )
+                    st.plotly_chart(fig_pres, use_container_width=True)
 
         except Exception as e:
             st.error(f"Error executing analysis: {e}")
