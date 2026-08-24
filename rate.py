@@ -94,6 +94,9 @@ if uploaded_file is not None:
     with col_map3:
         pwh_col = st.selectbox("Wellhead Pressure Column", available_cols, index=default_pwh)
 
+    # Interactive slider allowing forecasts from 1 to 20 years into the future
+    future_months = st.slider("Forecast Horizon (Months)", min_value=12, max_value=240, value=120, step=12)
+
     if st.button("Run Decline & Forecast Analysis"):
         try:
             df = pd.DataFrame()
@@ -101,7 +104,7 @@ if uploaded_file is not None:
             df['Gas_Rate'] = pd.to_numeric(df_raw[gas_col], errors='coerce')
             df['Pwh'] = pd.to_numeric(df_raw[pwh_col], errors='coerce')
             
-            # Clean corrupt/empty dates and zero production
+            # Clean missing dates and filter non-producing shut-in rows
             df = df.dropna(subset=['Date', 'Gas_Rate']).sort_values('Date').reset_index(drop=True)
             df = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
             df['Pwh'] = df['Pwh'].replace(0, np.nan).ffill().bfill()
@@ -109,12 +112,12 @@ if uploaded_file is not None:
             if len(df) < 3:
                 st.error("Not enough valid producing data rows found under selected columns.")
             else:
-                # Resample daily data to Monthly averages for DCA stability
+                # Resample scatter/daily data to Monthly averages
                 df_monthly = df.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean'}).dropna().reset_index()
                 
                 fit_df = df_monthly if len(df_monthly) >= 3 else df
                 
-                # Fit DCA starting from Peak Production rate onwards
+                # Fit Arps curve from Peak Production rate onwards
                 peak_idx = fit_df['Gas_Rate'].idxmax()
                 df_decline = fit_df.iloc[peak_idx:].copy().reset_index(drop=True)
                 
@@ -124,7 +127,7 @@ if uploaded_file is not None:
                 df_decline['Months'] = (df_decline['Date'] - df_decline['Date'].iloc[0]).dt.days / 30.4375
                 qi_peak = float(df_decline['Gas_Rate'].iloc[0])
                 
-                # Fit Arps curve with minimum positive Di bound (0.001 / mo = 1.2%/yr)
+                # Fit Arps with lower bounds to avoid flatlines
                 try:
                     popt, _ = curve_fit(
                         arps_hyperbolic, 
@@ -137,7 +140,7 @@ if uploaded_file is not None:
                 except Exception:
                     fit_Di, fit_b = 0.02, 0.5
 
-                # Linear regression for wellhead pressure drop
+                # Linear regression for pressure drop
                 p_fit = np.polyfit(fit_df.index, fit_df['Pwh'], 1)
                 monthly_dP = max(-p_fit[0], 0.0)
                 
@@ -146,8 +149,7 @@ if uploaded_file is not None:
 
                 st.success(f"Calculated Parameters: Decline = {fit_Di*12*100:.1f}%/yr | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                # Forecast 36 Months into future
-                future_months = 36
+                # Project forward based on selected slider horizon
                 future_t = np.arange(1, future_months + 1)
                 
                 forecast_qg = arps_hyperbolic(future_t, qi_last, fit_Di, fit_b)
@@ -173,7 +175,7 @@ if uploaded_file is not None:
                 if loading_month:
                     st.warning(f"⚠️ **Forecast Warning:** Liquid loading is expected to begin around **{loading_month}**.")
                 else:
-                    st.info("✅ Well is projected to remain above the critical rate for the next 36 months.")
+                    st.info(f"✅ Well is projected to remain above the critical rate for the next {future_months} months.")
 
                 # Plotly Visualization
                 fig = go.Figure()
