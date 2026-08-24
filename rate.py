@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import math
+import io
 from scipy.optimize import curve_fit
 import plotly.graph_objects as go
 
@@ -115,7 +116,7 @@ if uploaded_file is not None:
             if len(df) < 3:
                 st.error("Not enough valid numeric data rows found. Ensure parameters contain valid numbers.")
             else:
-                # --- HISTORICAL CUMULATIVE PRODUCTION (FIRST DATE TO LAST HISTORICAL DATE) ---
+                # --- HISTORICAL CUMULATIVE PRODUCTION ---
                 df['Days_Step'] = df['Date'].diff().dt.total_seconds() / (24 * 3600)
                 df['Days_Step'] = df['Days_Step'].fillna(1.0) # default first entry step
                 hist_cum_mmscf = (df['Gas_Rate'] * df['Days_Step']).sum()
@@ -169,34 +170,47 @@ if uploaded_file is not None:
                     forecast_qc_base = []
                     forecast_qc_wo = []
                     
+                    temp_r = temp_f + 459.67
+                    vc_base = (1.9116 * (60.0 * (water_density - gas_density))**0.25) / (gas_density**0.5)
+                    
                     for f_date, P_psia in zip(forecast_dates, forecast_Pwh_psia):
-                        temp_r = temp_f + 459.67
-                        vc = (1.9116 * (60.0 * (water_density - gas_density))**0.25) / (gas_density**0.5)
-                        
-                        # Base case uses original tubing ID throughout
+                        # Base Case
                         area_base = math.pi * ((tubing_id / 2.0) / 12.0)**2
-                        qc_base = (3.066894 * P_psia * vc * area_base) / (temp_r * z_factor)
+                        qc_base = (3.066894 * P_psia * vc_base * area_base) / (temp_r * z_factor)
                         forecast_qc_base.append(qc_base)
                         
-                        # Workover case uses original ID before wo_dt, and switch to wo_tubing on/after wo_dt
-                        active_tubing = wo_tubing if f_date >= wo_dt else tubing_id
-                        area_wo = math.pi * ((active_tubing / 2.0) / 12.0)**2
-                        qc_wo = (3.066894 * P_psia * vc * area_wo) / (temp_r * z_factor)
-                        forecast_qc_wo.append(qc_wo)
+                        # Workover Case (strictly calculates only on or after the wo_date)
+                        if f_date >= wo_dt:
+                            area_wo = math.pi * ((wo_tubing / 2.0) / 12.0)**2
+                            qc_wo = (3.066894 * P_psia * vc_base * area_wo) / (temp_r * z_factor)
+                            forecast_qc_wo.append(qc_wo)
+                        else:
+                            forecast_qc_wo.append(None)
 
-                    # Arrays for seamless plotting
+                    # --- EXACT WORKOVER DATE PLOTTING FIX ---
                     plot_dates = [last_historical_date] + forecast_dates
                     plot_qg = [qi_last] + list(forecast_qg)
-                    plot_qc_base = [forecast_qc_base[0]] + list(forecast_qc_base)
-                    plot_qc_wo = [forecast_qc_wo[0]] + list(forecast_qc_wo)
-                    plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
-                    plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
+                    
+                    # Interpolate exact pressure at the workover date for a perfect start point
+                    days_from_last = (wo_dt - last_historical_date).days
+                    months_from_last = max(0, days_from_last / 30.4375)
+                    Pwh_at_wo = max(last_Pwh_psig - (monthly_dP * months_from_last), 0.0)
+                    Pwh_psia_at_wo = Pwh_at_wo + 14.7
+                    
+                    area_wo = math.pi * ((wo_tubing / 2.0) / 12.0)**2
+                    qc_wo_start = (3.066894 * Pwh_psia_at_wo * vc_base * area_wo) / (temp_r * z_factor)
+                    qc_base_start = (3.066894 * (last_Pwh_psig + 14.7) * vc_base * area_base) / (temp_r * z_factor)
+                    
+                    plot_qc_base = [qc_base_start] + list(forecast_qc_base)
+                    
+                    # Create plot lists starting strictly EXACTLY from the workover input date
+                    wo_dates_plot = [wo_dt] + [d for d, qc in zip(forecast_dates, forecast_qc_wo) if qc is not None]
+                    wo_qc_plot = [qc_wo_start] + [qc for qc in forecast_qc_wo if qc is not None]
 
-                    # --- LIMIT EVALUATION ---
+
+                    # --- LIMIT EVALUATION FIX ---
                     base_limit_idx = future_months
-                    wo_limit_idx = future_months
                     base_death_reason = "End of 5-year forecast"
-                    wo_death_reason = "End of 5-year forecast"
 
                     for i in range(future_months):
                         if forecast_qg[i] <= forecast_qc_base[i]:
@@ -208,21 +222,34 @@ if uploaded_file is not None:
                             base_death_reason = f"Pwh ≤ Pfl ({forecast_dates[i].strftime('%b %Y')})"
                             break
 
-                    for i in range(future_months):
-                        if forecast_qg[i] <= forecast_qc_wo[i]:
-                            wo_limit_idx = i
-                            wo_death_reason = f"Liquid Loading ({forecast_dates[i].strftime('%b %Y')})"
-                            break
-                        if forecast_Pwh_psig[i] <= forecast_Pfl_psig[i]:
-                            wo_limit_idx = i
-                            wo_death_reason = f"Pwh ≤ Pfl ({forecast_dates[i].strftime('%b %Y')})"
-                            break
+                    wo_limit_idx = future_months
+                    wo_death_reason = "End of 5-year forecast"
 
-                    # --- TOTAL CUMULATIVE PRODUCTION (HISTORICAL + FORECAST) ---
+                    for i in range(future_months):
+                        if forecast_dates[i] >= wo_dt:
+                            # Evaluate Workover death ONLY after workover actually happens
+                            if forecast_qg[i] <= forecast_qc_wo[i]:
+                                wo_limit_idx = i
+                                wo_death_reason = f"Liquid Loading ({forecast_dates[i].strftime('%b %Y')})"
+                                break
+                            if forecast_Pwh_psig[i] <= forecast_Pfl_psig[i]:
+                                wo_limit_idx = i
+                                wo_death_reason = f"Pwh ≤ Pfl ({forecast_dates[i].strftime('%b %Y')})"
+                                break
+
+                    # --- TOTAL CUMULATIVE PRODUCTION ---
                     days_per_month = 30.4375
                     
                     base_forecast_cum = np.sum(forecast_qg[:base_limit_idx]) * days_per_month if base_limit_idx > 0 else 0.0
-                    wo_forecast_cum = np.sum(forecast_qg[:wo_limit_idx]) * days_per_month if wo_limit_idx > 0 else 0.0
+                    
+                    # Workover cum logic: gathers production pre-workover (if not loaded) + post-workover
+                    wo_forecast_cum = 0.0
+                    for i in range(wo_limit_idx):
+                        if forecast_dates[i] < wo_dt:
+                            if i < base_limit_idx:
+                                wo_forecast_cum += forecast_qg[i] * days_per_month
+                        else:
+                            wo_forecast_cum += forecast_qg[i] * days_per_month
 
                     base_total_cum = hist_cum_mmscf + base_forecast_cum
                     wo_total_cum = hist_cum_mmscf + wo_forecast_cum
@@ -251,6 +278,45 @@ if uploaded_file is not None:
                                    f"**+{incremental_gain:.1f} MMscf**\n\n"
                                    f"Extends production by {max(0, wo_limit_idx - base_limit_idx)} months")
 
+                    # --- EXCEL EXPORT GENERATION ---
+                    df_forecast_export = pd.DataFrame({
+                        'Forecast Date': [d.strftime('%Y-%m-%d') for d in forecast_dates],
+                        'Forecast Gas Rate (MMscfd)': np.round(forecast_qg, 4),
+                        'Wellhead Pressure Pwh (psig)': np.round(forecast_Pwh_psig, 2),
+                        'Flowline Pressure Pfl (psig)': np.round(forecast_Pfl_psig, 2),
+                        'Base Critical Rate qc (MMscfd)': np.round(forecast_qc_base, 4),
+                        'Workover Critical Rate qc (MMscfd)': [np.round(qc, 4) if qc is not None else "N/A" for qc in forecast_qc_wo],
+                        'Base Active Status': ['Active' if i < base_limit_idx else 'Failed/Loaded' for i in range(future_months)],
+                        'Workover Active Status': ['Active' if (forecast_dates[i] >= wo_dt and i < wo_limit_idx) or (forecast_dates[i] < wo_dt and i < base_limit_idx) else 'Failed/Loaded' for i in range(future_months)]
+                    })
+
+                    df_summary_export = pd.DataFrame({
+                        'Parameter / Metric': [
+                            'Base Tubing ID (in)', 'Workover Tubing ID (in)', 'Workover Scheduled Date',
+                            'Base Total Lifetime Cumulative (MMscf)', 'Base Failure Reason',
+                            'Workover Total Lifetime Cumulative (MMscf)', 'Workover Failure Reason',
+                            'Incremental Cumulative Gain (MMscf)'
+                        ],
+                        'Value': [
+                            f"{tubing_id}", f"{wo_tubing}", f"{wo_date_input.strftime('%Y-%m-%d')}",
+                            f"{base_total_cum:.2f}", f"{base_death_reason}",
+                            f"{wo_total_cum:.2f}", f"{wo_death_reason}", f"{incremental_gain:.2f}"
+                        ]
+                    })
+
+                    excel_buffer = io.BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        df_summary_export.to_excel(writer, sheet_name='Executive Summary', index=False)
+                        df_forecast_export.to_excel(writer, sheet_name='Monthly Forecast', index=False)
+                    
+                    st.download_button(
+                        label="📥 Download Complete Forecast Analysis (Excel)",
+                        data=excel_buffer.getvalue(),
+                        file_name="Gas_Well_Forecast_and_Workover_Analysis.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+
                     # CHART 1: Production Rate vs Critical Rates
                     fig_rate = go.Figure()
                     fig_rate.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
@@ -263,18 +329,13 @@ if uploaded_file is not None:
                         fig_rate.add_trace(go.Scatter(x=[forecast_dates[wo_limit_idx]], y=[forecast_qg[wo_limit_idx]], mode='markers', marker=dict(color='gold', size=12, symbol='star'), name='Workover Limit'))
 
                     fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc_base, mode='lines', name=f'Base Critical Rate ({tubing_id}")', line=dict(color='#e74c3c', width=2, dash='dash')))
-                    fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc_wo, mode='lines', name=f'Workover Critical Rate ({wo_tubing}")', line=dict(color='#f1c40f', width=2, dash='dash')))
+                    
+                    if wo_dates_plot:
+                        fig_rate.add_trace(go.Scatter(x=wo_dates_plot, y=wo_qc_plot, mode='lines', name=f'Workover Critical Rate ({wo_tubing}")', line=dict(color='#f1c40f', width=2, dash='dash')))
 
-                    # Add vertical marker line for Workover Date
                     fig_rate.add_vline(x=wo_dt.strftime('%Y-%m-%d'), line_dash="dash", line_color="gold", annotation_text="Workover Date", annotation_position="top left")
 
-                    fig_rate.update_layout(
-                        title="1. Production Rate Forecast vs. Critical Gas Rates",
-                        xaxis_title="Date",
-                        yaxis_title="Gas Rate (MMscfd)",
-                        template="plotly_dark",
-                        hovermode="x unified"
-                    )
+                    fig_rate.update_layout(title="1. Production Rate Forecast vs. Critical Gas Rates", xaxis_title="Date", yaxis_title="Gas Rate (MMscfd)", template="plotly_dark", hovermode="x unified")
                     st.plotly_chart(fig_rate, use_container_width=True)
 
                     # CHART 2: Wellhead Pressure vs Flowline Pressure
@@ -283,14 +344,7 @@ if uploaded_file is not None:
                     fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pfl'], mode='lines', name='Historical Pfl', line=dict(color='#e67e22', dash='dot')))
                     fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pwh, mode='lines', name='Forecasted Pwh', line=dict(color='#00bc8c', width=3)))
                     fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pfl, mode='lines', name='Flowline Pressure Limit (Pfl)', line=dict(color='#e74c3c', width=2, dash='dash')))
-
-                    fig_pres.update_layout(
-                        title="2. Wellhead Pressure (Pwh) Forecast vs. Flowline Pressure Limit (Pfl)",
-                        xaxis_title="Date",
-                        yaxis_title="Pressure (psig)",
-                        template="plotly_dark",
-                        hovermode="x unified"
-                    )
+                    fig_pres.update_layout(title="2. Wellhead Pressure (Pwh) Forecast vs. Flowline Pressure Limit (Pfl)", xaxis_title="Date", yaxis_title="Pressure (psig)", template="plotly_dark", hovermode="x unified")
                     st.plotly_chart(fig_pres, use_container_width=True)
 
         except Exception as e:
