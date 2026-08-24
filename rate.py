@@ -108,6 +108,11 @@ if uploaded_file is not None:
             if len(df) < 3:
                 st.error("Not enough valid numeric data rows found. Ensure parameters contain valid numbers.")
             else:
+                # --- HISTORICAL CUMULATIVE PRODUCTION (FIRST DATE TO LAST HISTORICAL DATE) ---
+                df['Days_Step'] = df['Date'].diff().dt.total_seconds() / (24 * 3600)
+                df['Days_Step'] = df['Days_Step'].fillna(1.0) # default first entry step
+                hist_cum_mmscf = (df['Gas_Rate'] * df['Days_Step']).sum()
+
                 df_active = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
                 
                 if len(df_active) < 3:
@@ -177,13 +182,12 @@ if uploaded_file is not None:
                     plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
                     plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
 
-                    # Limit Evaluation
+                    # --- LIMIT EVALUATION ---
                     base_limit_idx = future_months
                     wo_limit_idx = future_months
                     base_death_reason = "End of 5-year forecast"
                     wo_death_reason = "End of 5-year forecast"
 
-                    # Base Case limit check
                     for i in range(future_months):
                         if forecast_qg[i] <= forecast_qc_base[i]:
                             base_limit_idx = i
@@ -194,7 +198,6 @@ if uploaded_file is not None:
                             base_death_reason = f"Pwh ≤ Pfl ({forecast_dates[i].strftime('%b %Y')})"
                             break
 
-                    # Workover Case limit check
                     for i in range(future_months):
                         if forecast_qg[i] <= forecast_qc_wo[i]:
                             wo_limit_idx = i
@@ -205,30 +208,38 @@ if uploaded_file is not None:
                             wo_death_reason = f"Pwh ≤ Pfl ({forecast_dates[i].strftime('%b %Y')})"
                             break
 
-                    # Cumulative production calculation
+                    # --- TOTAL CUMULATIVE PRODUCTION (HISTORICAL + FORECAST) ---
                     days_per_month = 30.4375
-                    base_cum_mmscf = np.sum(forecast_qg[:base_limit_idx]) * days_per_month
-                    wo_cum_mmscf = np.sum(forecast_qg[:wo_limit_idx]) * days_per_month
-                    incremental_gain = wo_cum_mmscf - base_cum_mmscf
+                    
+                    base_forecast_cum = np.sum(forecast_qg[:base_limit_idx]) * days_per_month if base_limit_idx > 0 else 0.0
+                    wo_forecast_cum = np.sum(forecast_qg[:wo_limit_idx]) * days_per_month if wo_limit_idx > 0 else 0.0
+
+                    base_total_cum = hist_cum_mmscf + base_forecast_cum
+                    wo_total_cum = hist_cum_mmscf + wo_forecast_cum
+                    incremental_gain = wo_total_cum - base_total_cum
 
                     # Display Dashboard Metrics
-                    st.subheader("📊 Remaining Recoverable Volume & Operating Limits")
+                    st.subheader("📊 Total Lifetime Cumulative Production (Start Date to Failure)")
                     metric_col1, metric_col2, metric_col3 = st.columns(3)
                     
                     with metric_col1:
                         st.info(f"**Base Case ({tubing_id}\" ID)**\n\n"
-                                f"**Cum. Production:** {base_cum_mmscf:.1f} MMscf\n\n"
-                                f"**Limiting Constraint:** {base_death_reason}")
+                                f"• **Historical Cum:** {hist_cum_mmscf:.1f} MMscf\n\n"
+                                f"• **Forecast Cum:** {base_forecast_cum:.1f} MMscf\n\n"
+                                f"• **Total Lifetime Cum:** {base_total_cum:.1f} MMscf\n\n"
+                                f"**Constraint:** {base_death_reason}")
                         
                     with metric_col2:
                         st.success(f"**Workover Case ({wo_tubing}\" ID)**\n\n"
-                                   f"**Cum. Production:** {wo_cum_mmscf:.1f} MMscf\n\n"
-                                   f"**Limiting Constraint:** {wo_death_reason}")
+                                   f"• **Historical Cum:** {hist_cum_mmscf:.1f} MMscf\n\n"
+                                   f"• **Forecast Cum:** {wo_forecast_cum:.1f} MMscf\n\n"
+                                   f"• **Total Lifetime Cum:** {wo_total_cum:.1f} MMscf\n\n"
+                                   f"**Constraint:** {wo_death_reason}")
                         
                     with metric_col3:
                         st.warning(f"**Workover Incremental Gain**\n\n"
                                    f"**+{incremental_gain:.1f} MMscf**\n\n"
-                                   f"Life extended by {abs(wo_limit_idx - base_limit_idx)} months")
+                                   f"Extends production by {max(0, wo_limit_idx - base_limit_idx)} months")
 
                     # CHART 1: Production Rate vs Critical Rates
                     fig_rate = go.Figure()
