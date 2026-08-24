@@ -118,7 +118,7 @@ if uploaded_file is not None:
             else:
                 # --- HISTORICAL CUMULATIVE PRODUCTION ---
                 df['Days_Step'] = df['Date'].diff().dt.total_seconds() / (24 * 3600)
-                df['Days_Step'] = df['Days_Step'].fillna(1.0) # default first entry step
+                df['Days_Step'] = df['Days_Step'].fillna(1.0)
                 hist_cum_mmscf = (df['Gas_Rate'] * df['Days_Step']).sum()
 
                 df_active = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
@@ -190,6 +190,8 @@ if uploaded_file is not None:
                     # --- EXACT WORKOVER DATE PLOTTING FIX ---
                     plot_dates = [last_historical_date] + forecast_dates
                     plot_qg = [qi_last] + list(forecast_qg)
+                    plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
+                    plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
                     
                     # Interpolate exact pressure at the workover date for a perfect start point
                     days_from_last = (wo_dt - last_historical_date).days
@@ -206,7 +208,6 @@ if uploaded_file is not None:
                     # Create plot lists starting strictly EXACTLY from the workover input date
                     wo_dates_plot = [wo_dt] + [d for d, qc in zip(forecast_dates, forecast_qc_wo) if qc is not None]
                     wo_qc_plot = [qc_wo_start] + [qc for qc in forecast_qc_wo if qc is not None]
-
 
                     # --- LIMIT EVALUATION FIX ---
                     base_limit_idx = future_months
@@ -227,7 +228,6 @@ if uploaded_file is not None:
 
                     for i in range(future_months):
                         if forecast_dates[i] >= wo_dt:
-                            # Evaluate Workover death ONLY after workover actually happens
                             if forecast_qg[i] <= forecast_qc_wo[i]:
                                 wo_limit_idx = i
                                 wo_death_reason = f"Liquid Loading ({forecast_dates[i].strftime('%b %Y')})"
@@ -242,7 +242,6 @@ if uploaded_file is not None:
                     
                     base_forecast_cum = np.sum(forecast_qg[:base_limit_idx]) * days_per_month if base_limit_idx > 0 else 0.0
                     
-                    # Workover cum logic: gathers production pre-workover (if not loaded) + post-workover
                     wo_forecast_cum = 0.0
                     for i in range(wo_limit_idx):
                         if forecast_dates[i] < wo_dt:
