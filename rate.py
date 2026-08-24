@@ -101,38 +101,56 @@ if uploaded_file is not None:
             df['Gas_Rate'] = pd.to_numeric(df_raw[gas_col], errors='coerce')
             df['Pwh'] = pd.to_numeric(df_raw[pwh_col], errors='coerce')
             
-            # 1. Clean missing dates and gas rates
+            # Clean corrupt/empty dates and zero production
             df = df.dropna(subset=['Date', 'Gas_Rate']).sort_values('Date').reset_index(drop=True)
-            
-            # 2. CRITICAL FIX: Filter out non-producing/zero-rate shut-in tail rows
             df = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
-            
-            # 3. Handle pressure zeros/missing values by forward filling
             df['Pwh'] = df['Pwh'].replace(0, np.nan).ffill().bfill()
             
             if len(df) < 3:
                 st.error("Not enough valid producing data rows found under selected columns.")
             else:
-                # Convert time index to months relative to start
-                df['Months'] = (df['Date'] - df['Date'].iloc[0]).dt.days / 30.4375
-                qi_input = float(df['Gas_Rate'].iloc[-1])
+                # Resample daily data to Monthly averages for DCA stability
+                df_monthly = df.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean'}).dropna().reset_index()
                 
-                # Fit Arps Decline Curve
-                popt, _ = curve_fit(arps_hyperbolic, df['Months'], df['Gas_Rate'], p0=[qi_input, 0.02, 0.5], bounds=(0, [np.inf, 1.0, 1.0]))
-                _, fit_Di, fit_b = popt
+                fit_df = df_monthly if len(df_monthly) >= 3 else df
                 
-                # Fit Linear Pressure Drop
-                p_fit = np.polyfit(df['Months'], df['Pwh'], 1)
+                # Fit DCA starting from Peak Production rate onwards
+                peak_idx = fit_df['Gas_Rate'].idxmax()
+                df_decline = fit_df.iloc[peak_idx:].copy().reset_index(drop=True)
+                
+                if len(df_decline) < 3:
+                    df_decline = fit_df.copy().reset_index(drop=True)
+
+                df_decline['Months'] = (df_decline['Date'] - df_decline['Date'].iloc[0]).dt.days / 30.4375
+                qi_peak = float(df_decline['Gas_Rate'].iloc[0])
+                
+                # Fit Arps curve with minimum positive Di bound (0.001 / mo = 1.2%/yr)
+                try:
+                    popt, _ = curve_fit(
+                        arps_hyperbolic, 
+                        df_decline['Months'], 
+                        df_decline['Gas_Rate'], 
+                        p0=[qi_peak, 0.02, 0.5], 
+                        bounds=([0, 0.001, 0.01], [np.inf, 1.0, 1.0])
+                    )
+                    _, fit_Di, fit_b = popt
+                except Exception:
+                    fit_Di, fit_b = 0.02, 0.5
+
+                # Linear regression for wellhead pressure drop
+                p_fit = np.polyfit(fit_df.index, fit_df['Pwh'], 1)
                 monthly_dP = max(-p_fit[0], 0.0)
+                
+                qi_last = float(df['Gas_Rate'].iloc[-1])
                 last_Pwh_psig = float(df['Pwh'].iloc[-1])
 
                 st.success(f"Calculated Parameters: Decline = {fit_Di*12*100:.1f}%/yr | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                # Forecast 36 Months from the last producing month
+                # Forecast 36 Months into future
                 future_months = 36
                 future_t = np.arange(1, future_months + 1)
                 
-                forecast_qg = arps_hyperbolic(future_t, qi_input, fit_Di, fit_b)
+                forecast_qg = arps_hyperbolic(future_t, qi_last, fit_Di, fit_b)
                 forecast_Pwh_psig = np.maximum(last_Pwh_psig - (monthly_dP * future_t), 0.0)
                 forecast_Pwh_psia = forecast_Pwh_psig + 14.7
                 
