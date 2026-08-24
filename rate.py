@@ -6,7 +6,7 @@ from scipy.optimize import curve_fit
 import plotly.graph_objects as go
 
 # Set page configuration
-st.set_page_config(page_title="Gas Well Performance & Critical Rate", page_icon="🛢️", layout="centered")
+st.set_page_config(page_title="Gas Well Performance & Critical Rate", page_icon="🛢️", layout="wide")
 
 st.title("Gas Well Performance & Pressure Forecast 🛢️")
 
@@ -24,7 +24,7 @@ with col2:
     st.subheader("Wellhead Conditions")
     pressure_psig = st.number_input("Current Wellhead Pressure (psig)", min_value=0.0, value=278.0, step=1.0)
     temp_f = st.number_input("Wellhead Temperature (°F)", min_value=0.0, value=137.0, step=1.0)
-    tubing_id = st.number_input("Tubing Inner Diameter (inches)", min_value=1.0, value=4.5, step=0.125)
+    tubing_id = st.number_input("Current Tubing ID (inches)", min_value=1.0, value=4.5, step=0.125)
 
 if st.button("Calculate Current Critical Rate", type="primary", use_container_width=True):
     if gas_density >= water_density:
@@ -44,7 +44,7 @@ if st.button("Calculate Current Critical Rate", type="primary", use_container_wi
 
 # --- 2. HISTORICAL EXCEL FORECASTING MODULE ---
 st.divider()
-st.subheader("📈 Historical Analysis & Dual Limits Forecast")
+st.subheader("📈 Historical Analysis & Workover Simulation")
 
 def arps_hyperbolic(t, qi, Di, b):
     return qi / ((1 + b * Di * t) ** (1 / b))
@@ -67,13 +67,11 @@ if uploaded_file is not None:
     
     df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
     df_raw.columns = df_raw.columns.astype(str).str.strip()
-    
     available_cols = list(df_raw.columns)
     
-    st.markdown("**Map Excel Columns:**")
+    st.markdown("**1. Map Excel Columns:**")
     col_map1, col_map2, col_map3, col_map4 = st.columns(4)
     
-    # Auto-detect column headers
     default_date = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['date', 'time', 'timestamp'])), 0)
     default_gas = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['gas', 'qg', 'rate', 'fn'])), min(1, len(available_cols)-1))
     default_pwh = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['pwh', 'pressure', 'pres', 'fq'])), min(2, len(available_cols)-1))
@@ -88,7 +86,15 @@ if uploaded_file is not None:
     with col_map4:
         pfl_col = st.selectbox("Flowline Pressure (Pfl)", available_cols, index=default_pfl)
 
-    if st.button("Run Complete Forecast Analysis"):
+    st.markdown("**2. Workover Simulation (Velocity String):**")
+    wo_tubing = st.selectbox(
+        "Select Proposed Workover Tubing ID", 
+        options=[1.500, 1.995, 2.441, 2.992, 3.958], 
+        format_func=lambda x: f"{x} inches", 
+        index=1
+    )
+
+    if st.button("Run Forecast & Workover Analysis", type="primary"):
         try:
             df = pd.DataFrame()
             df['Date'] = parse_robust_dates(df_raw[date_col])
@@ -96,23 +102,20 @@ if uploaded_file is not None:
             df['Pwh'] = clean_numeric(df_raw[pwh_col])
             df['Pfl'] = clean_numeric(df_raw[pfl_col])
             
-            # Neglect/drop any row containing text, missing values, or non-numeric strings
             df = df.dropna(subset=['Date', 'Gas_Rate', 'Pwh', 'Pfl']).sort_values('Date').reset_index(drop=True)
             
             if len(df) < 3:
                 st.error("Not enough valid numeric data rows found. Ensure parameters contain valid numbers.")
             else:
-                # Active production rows (Gas_Rate > 0)
                 df_active = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
                 
                 if len(df_active) < 3:
                     st.error("Not enough positive gas production data rows found.")
                 else:
-                    # Monthly aggregation
+                    # Decline Curve fitting
                     df_monthly = df_active.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean', 'Pfl': 'mean'}).dropna().reset_index()
                     fit_df = df_monthly if len(df_monthly) >= 3 else df_active
                     
-                    # Fit Arps Decline Curve
                     peak_idx = fit_df['Gas_Rate'].idxmax()
                     df_decline = fit_df.iloc[peak_idx:].copy().reset_index(drop=True)
                     if len(df_decline) < 3:
@@ -122,18 +125,11 @@ if uploaded_file is not None:
                     qi_peak = float(df_decline['Gas_Rate'].iloc[0])
                     
                     try:
-                        popt, _ = curve_fit(
-                            arps_hyperbolic, 
-                            df_decline['Months'], 
-                            df_decline['Gas_Rate'], 
-                            p0=[qi_peak, 0.02, 0.5], 
-                            bounds=([0, 0.001, 0.01], [np.inf, 1.0, 1.0])
-                        )
+                        popt, _ = curve_fit(arps_hyperbolic, df_decline['Months'], df_decline['Gas_Rate'], p0=[qi_peak, 0.02, 0.5], bounds=([0, 0.001, 0.01], [np.inf, 1.0, 1.0]))
                         _, fit_Di, fit_b = popt
                     except Exception:
                         fit_Di, fit_b = 0.02, 0.5
 
-                    # Linear regression for Wellhead Pressure drop rate
                     p_fit = np.polyfit(fit_df.index, fit_df['Pwh'], 1)
                     monthly_dP = max(-p_fit[0], 0.0)
                     
@@ -141,10 +137,10 @@ if uploaded_file is not None:
                     last_Pwh_psig = float(df_active['Pwh'].iloc[-1])
                     last_Pfl_psig = float(df_active['Pfl'].iloc[-1])
 
-                    st.success(f"Parameters: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
+                    st.success(f"DCA Parameters Calculated: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                    # Project 36 months forward
-                    future_months = 36
+                    # Project 60 months forward to ensure we hit limits
+                    future_months = 60
                     last_historical_date = df['Date'].iloc[-1]
                     future_t = np.arange(1, future_months + 1)
                     
@@ -153,80 +149,111 @@ if uploaded_file is not None:
                     forecast_Pfl_psig = np.full(future_months, last_Pfl_psig)
                     
                     forecast_Pwh_psia = forecast_Pwh_psig + 14.7
-                    forecast_qc = []
+                    
+                    forecast_qc_base = []
+                    forecast_qc_wo = []
+                    
                     for P_psia in forecast_Pwh_psia:
                         temp_r = temp_f + 459.67
-                        area = math.pi * ((tubing_id / 2.0) / 12.0)**2
+                        # Base case area
+                        area_base = math.pi * ((tubing_id / 2.0) / 12.0)**2
+                        # Workover case area
+                        area_wo = math.pi * ((wo_tubing / 2.0) / 12.0)**2
+                        
                         vc = (1.9116 * (60.0 * (water_density - gas_density))**0.25) / (gas_density**0.5)
-                        qc = (3.066894 * P_psia * vc * area) / (temp_r * z_factor)
-                        forecast_qc.append(qc)
+                        
+                        qc_base = (3.066894 * P_psia * vc * area_base) / (temp_r * z_factor)
+                        qc_wo = (3.066894 * P_psia * vc * area_wo) / (temp_r * z_factor)
+                        
+                        forecast_qc_base.append(qc_base)
+                        forecast_qc_wo.append(qc_wo)
 
                     forecast_dates = [last_historical_date + pd.DateOffset(months=i) for i in range(1, future_months + 1)]
 
-                    # Build seamless continuity arrays
+                    # Arrays for plotting
                     plot_dates = [last_historical_date] + forecast_dates
                     plot_qg = [qi_last] + list(forecast_qg)
-                    plot_qc = [forecast_qc[0]] + list(forecast_qc)
-                    plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
-                    plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
+                    plot_qc_base = [forecast_qc_base[0]] + list(forecast_qc_base)
+                    plot_qc_wo = [forecast_qc_wo[0]] + list(forecast_qc_wo)
 
-                    # Find Limit Months
-                    loading_month = None
-                    pressure_limit_month = None
-
-                    for i in range(future_months):
-                        if loading_month is None and forecast_qg[i] <= forecast_qc[i]:
-                            loading_month = forecast_dates[i].strftime("%B %Y")
-                        
-                        if pressure_limit_month is None and forecast_Pwh_psig[i] <= forecast_Pfl_psig[i]:
-                            pressure_limit_month = forecast_dates[i].strftime("%B %Y")
-
-                    # --- INSIGHTS & WARNINGS ---
-                    st.subheader("📋 Well Operating Limits Summary")
-                    res_col1, res_col2 = st.columns(2)
+                    # --- LIMITS & CUMULATIVE PRODUCTION LOGIC ---
+                    base_limit_idx = future_months
+                    wo_limit_idx = future_months
                     
-                    with res_col1:
-                        if loading_month:
-                            st.warning(f"⚠️ **Liquid Loading Limit:**\nExpected around **{loading_month}**.")
-                        else:
-                            st.success(f"✅ **Liquid Loading:**\nAbove critical rate for >36 months.")
+                    base_death_reason = "End of forecast window"
+                    wo_death_reason = "End of forecast window"
 
-                    with res_col2:
-                        if pressure_limit_month:
-                            st.error(f"🛑 **Min Flowline Pressure Limit:**\n$P_{{wh}} \\le P_{{fl}}$ around **{pressure_limit_month}**.")
-                        else:
-                            st.success(f"✅ **Flowline Pressure:**\n$P_{{wh}}$ remains above $P_{{fl}}$ for >36 months.")
+                    # Find base case limit
+                    for i in range(future_months):
+                        if forecast_qg[i] <= forecast_qc_base[i]:
+                            base_limit_idx = i
+                            base_death_reason = f"Liquid Loading ({forecast_dates[i].strftime('%b %Y')})"
+                            break
+                        if forecast_Pwh_psig[i] <= forecast_Pfl_psig[i]:
+                            base_limit_idx = i
+                            base_death_reason = f"Pressure below Flowline ({forecast_dates[i].strftime('%b %Y')})"
+                            break
 
-                    # --- VISUALIZATION 1: GAS RATE VS CRITICAL RATE ---
+                    # Find workover case limit
+                    for i in range(future_months):
+                        if forecast_qg[i] <= forecast_qc_wo[i]:
+                            wo_limit_idx = i
+                            wo_death_reason = f"Liquid Loading ({forecast_dates[i].strftime('%b %Y')})"
+                            break
+                        if forecast_Pwh_psig[i] <= forecast_Pfl_psig[i]:
+                            wo_limit_idx = i
+                            wo_death_reason = f"Pressure below Flowline ({forecast_dates[i].strftime('%b %Y')})"
+                            break
+
+                    # Cumulative production (Rate in MMscfd * days in a month)
+                    days_per_month = 30.4375
+                    base_cum_mmscf = np.sum(forecast_qg[:base_limit_idx]) * days_per_month
+                    wo_cum_mmscf = np.sum(forecast_qg[:wo_limit_idx]) * days_per_month
+                    incremental_gain = wo_cum_mmscf - base_cum_mmscf
+
+                    # --- DASHBOARD METRICS ---
+                    st.subheader("📊 Remaining Recoverable Volume & Limits")
+                    metric_col1, metric_col2, metric_col3 = st.columns(3)
+                    
+                    with metric_col1:
+                        st.info(f"**Base Case ({tubing_id}\" ID)**\n\n"
+                                f"**Cum. Recovery:** {base_cum_mmscf:.1f} MMscf\n\n"
+                                f"**Limiting Factor:** {base_death_reason}")
+                        
+                    with metric_col2:
+                        st.success(f"**Workover Case ({wo_tubing}\" ID)**\n\n"
+                                   f"**Cum. Recovery:** {wo_cum_mmscf:.1f} MMscf\n\n"
+                                   f"**Limiting Factor:** {wo_death_reason}")
+                        
+                    with metric_col3:
+                        st.warning(f"**Workover Incremental Gain**\n\n"
+                                   f"**+{incremental_gain:.1f} MMscf**\n\n"
+                                   f"Life extended by {abs(wo_limit_idx - base_limit_idx)} months")
+
+                    # --- VISUALIZATIONS ---
                     fig_rate = go.Figure()
                     fig_rate.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
                     fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
-                    fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc, mode='lines', name='Critical Rate Threshold (qc)', line=dict(color='#e74c3c', width=2, dash='dash')))
+                    
+                    # Highlight death point for base
+                    if base_limit_idx < future_months:
+                        fig_rate.add_trace(go.Scatter(x=[forecast_dates[base_limit_idx]], y=[forecast_qg[base_limit_idx]], mode='markers', marker=dict(color='red', size=10, symbol='x'), name='Base Case Dies'))
+                    
+                    # Highlight death point for workover
+                    if wo_limit_idx < future_months:
+                        fig_rate.add_trace(go.Scatter(x=[forecast_dates[wo_limit_idx]], y=[forecast_qg[wo_limit_idx]], mode='markers', marker=dict(color='gold', size=10, symbol='star'), name='Workover Dies'))
+
+                    fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc_base, mode='lines', name=f'Base Critical Rate ({tubing_id}")', line=dict(color='#e74c3c', width=2, dash='dash')))
+                    fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc_wo, mode='lines', name=f'Workover Critical Rate ({wo_tubing}")', line=dict(color='#f1c40f', width=2, dash='dash')))
 
                     fig_rate.update_layout(
-                        title="1. Production Rate Forecast vs. Critical Rate (Liquid Loading)",
+                        title="1. Production Forecast & Tubing Critical Rates",
                         xaxis_title="Date",
                         yaxis_title="Gas Rate (MMscfd)",
                         template="plotly_dark",
                         hovermode="x unified"
                     )
                     st.plotly_chart(fig_rate, use_container_width=True)
-
-                    # --- VISUALIZATION 2: WELLHEAD PRESSURE VS FLOWLINE PRESSURE ---
-                    fig_pres = go.Figure()
-                    fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pwh'], mode='lines', name='Historical Pwh', line=dict(color='#3498db', dash='dot')))
-                    fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pfl'], mode='lines', name='Historical Pfl', line=dict(color='#e67e22', dash='dot')))
-                    fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pwh, mode='lines', name='Forecasted Pwh', line=dict(color='#00bc8c', width=3)))
-                    fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pfl, mode='lines', name='Flowline Pressure Limit (Pfl)', line=dict(color='#e74c3c', width=2, dash='dash')))
-
-                    fig_pres.update_layout(
-                        title="2. Wellhead Pressure (Pwh) Forecast vs. Flowline Pressure Limit (Pfl)",
-                        xaxis_title="Date",
-                        yaxis_title="Pressure (psig)",
-                        template="plotly_dark",
-                        hovermode="x unified"
-                    )
-                    st.plotly_chart(fig_pres, use_container_width=True)
 
         except Exception as e:
             st.error(f"Error executing analysis: {e}")
