@@ -54,8 +54,9 @@ def parse_robust_dates(series):
     return pd.to_datetime(series, errors='coerce')
 
 def clean_numeric(series):
-    """Converts numbers to floats and coerces any text or non-numeric strings to NaN."""
+    """Converts numbers to floats, mapping dashes, blanks, and text strings to NaN."""
     cleaned = series.astype(str).str.replace(',', '', regex=False).str.strip()
+    cleaned = cleaned.replace(['-', '--', 'N/A', 'nan', 'none', 'None', ''], np.nan)
     return pd.to_numeric(cleaned, errors='coerce')
 
 uploaded_file = st.file_uploader("Upload Historical Well Data (Excel)", type=["xlsx", "xls"])
@@ -116,11 +117,12 @@ if uploaded_file is not None:
             if len(df) < 3:
                 st.error("Not enough valid numeric data rows found. Ensure parameters contain valid numbers.")
             else:
-                # --- HISTORICAL CUMULATIVE PRODUCTION ---
+                # Historical Cumulative Calculation
                 df['Days_Step'] = df['Date'].diff().dt.total_seconds() / (24 * 3600)
                 df['Days_Step'] = df['Days_Step'].fillna(1.0)
                 hist_cum_mmscf = (df['Gas_Rate'] * df['Days_Step']).sum()
 
+                # Filter strictly positive active data for DCA fitting & forecasting
                 df_active = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
                 
                 if len(df_active) < 3:
@@ -179,7 +181,7 @@ if uploaded_file is not None:
                         qc_base = (3.066894 * P_psia * vc_base * area_base) / (temp_r * z_factor)
                         forecast_qc_base.append(qc_base)
                         
-                        # Workover Case (strictly calculates only on or after the wo_date)
+                        # Workover Case (calculates strictly on or after workover date)
                         if f_date >= wo_dt:
                             area_wo = math.pi * ((wo_tubing / 2.0) / 12.0)**2
                             qc_wo = (3.066894 * P_psia * vc_base * area_wo) / (temp_r * z_factor)
@@ -187,13 +189,12 @@ if uploaded_file is not None:
                         else:
                             forecast_qc_wo.append(None)
 
-                    # --- EXACT WORKOVER DATE PLOTTING FIX ---
+                    # Plotting Arrays & Seamless Workover Date Interpolation
                     plot_dates = [last_historical_date] + forecast_dates
                     plot_qg = [qi_last] + list(forecast_qg)
                     plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
                     plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
                     
-                    # Interpolate exact pressure at the workover date for a perfect start point
                     days_from_last = (wo_dt - last_historical_date).days
                     months_from_last = max(0, days_from_last / 30.4375)
                     Pwh_at_wo = max(last_Pwh_psig - (monthly_dP * months_from_last), 0.0)
@@ -205,11 +206,10 @@ if uploaded_file is not None:
                     
                     plot_qc_base = [qc_base_start] + list(forecast_qc_base)
                     
-                    # Create plot lists starting strictly EXACTLY from the workover input date
                     wo_dates_plot = [wo_dt] + [d for d, qc in zip(forecast_dates, forecast_qc_wo) if qc is not None]
                     wo_qc_plot = [qc_wo_start] + [qc for qc in forecast_qc_wo if qc is not None]
 
-                    # --- LIMIT EVALUATION FIX ---
+                    # Limit Evaluations
                     base_limit_idx = future_months
                     base_death_reason = "End of 5-year forecast"
 
@@ -237,7 +237,7 @@ if uploaded_file is not None:
                                 wo_death_reason = f"Pwh ≤ Pfl ({forecast_dates[i].strftime('%b %Y')})"
                                 break
 
-                    # --- TOTAL CUMULATIVE PRODUCTION ---
+                    # Cumulative Production Integration
                     days_per_month = 30.4375
                     
                     base_forecast_cum = np.sum(forecast_qg[:base_limit_idx]) * days_per_month if base_limit_idx > 0 else 0.0
@@ -254,7 +254,7 @@ if uploaded_file is not None:
                     wo_total_cum = hist_cum_mmscf + wo_forecast_cum
                     incremental_gain = wo_total_cum - base_total_cum
 
-                    # Display Dashboard Metrics
+                    # Metrics Summary UI
                     st.subheader("📊 Total Lifetime Cumulative Production (Start Date to Failure)")
                     metric_col1, metric_col2, metric_col3 = st.columns(3)
                     
@@ -277,7 +277,7 @@ if uploaded_file is not None:
                                    f"**+{incremental_gain:.1f} MMscf**\n\n"
                                    f"Extends production by {max(0, wo_limit_idx - base_limit_idx)} months")
 
-                    # --- EXCEL EXPORT GENERATION ---
+                    # Excel Export Setup
                     df_forecast_export = pd.DataFrame({
                         'Forecast Date': [d.strftime('%Y-%m-%d') for d in forecast_dates],
                         'Forecast Gas Rate (MMscfd)': np.round(forecast_qg, 4),
@@ -316,9 +316,12 @@ if uploaded_file is not None:
                         use_container_width=True
                     )
 
+                    # Filter zero production rows for historical plotting so shut-ins don't flatline the plot
+                    df_hist_plot = df[df['Gas_Rate'] > 0].copy()
+
                     # CHART 1: Production Rate vs Critical Rates
                     fig_rate = go.Figure()
-                    fig_rate.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
+                    fig_rate.add_trace(go.Scatter(x=df_hist_plot['Date'], y=df_hist_plot['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
                     fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
                     
                     if base_limit_idx < future_months:
