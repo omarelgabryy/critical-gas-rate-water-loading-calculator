@@ -22,30 +22,26 @@ with col1:
     z_factor = st.number_input("Z-Factor", min_value=0.1000, value=0.8843, step=0.0001, format="%0.4f")
 
 with col2:
-    st.subheader("Wellhead Conditions & Tubing")
+    st.subheader("Wellhead Conditions")
     pressure_psig = st.number_input("Current Wellhead Pressure (psig)", min_value=0.0, value=278.0, step=1.0)
     temp_f = st.number_input("Wellhead Temperature (°F)", min_value=0.0, value=137.0, step=1.0)
     tubing_id = st.number_input("Current Tubing ID (inches)", min_value=1.0, value=4.5, step=0.125)
-    wo_tubing_calc = st.selectbox("Proposed Workover Tubing ID (inches)", options=[1.500, 1.995, 2.441, 2.992, 3.958], index=1)
 
-if st.button("Calculate Current Critical Rates", type="primary", use_container_width=True):
+if st.button("Calculate Current Critical Rate", type="primary", use_container_width=True):
     if gas_density >= water_density:
         st.error("Error: Gas density cannot be greater than or equal to water density.")
     else:
         pressure_psia = pressure_psig + 14.7
         temp_r = temp_f + 459.67
-        area_base = math.pi * ((tubing_id / 2.0) / 12.0)**2
-        area_wo = math.pi * ((wo_tubing_calc / 2.0) / 12.0)**2
+        area = math.pi * ((tubing_id / 2.0) / 12.0)**2
         sigma = 60.0
         
         critical_velocity = (1.9116 * (sigma * (water_density - gas_density))**0.25) / (gas_density**0.5)
-        critical_rate_base = (3.066894 * pressure_psia * critical_velocity * area_base) / (temp_r * z_factor)
-        critical_rate_wo = (3.066894 * pressure_psia * critical_velocity * area_wo) / (temp_r * z_factor)
+        critical_rate = (3.066894 * pressure_psia * critical_velocity * area) / (temp_r * z_factor)
             
-        res_col1, res_col2, res_col3 = st.columns(3)
-        res_col1.metric("Base Critical Rate (qc)", f"{critical_rate_base:.3f} MMscfd")
-        res_col2.metric("Workover Critical Rate (qc)", f"{critical_rate_wo:.3f} MMscfd", delta=f"{critical_rate_wo - critical_rate_base:.3f} MMscfd")
-        res_col3.metric("Critical Velocity (vc)", f"{critical_velocity:.2f} ft/s")
+        res_col1, res_col2 = st.columns(2)
+        res_col1.metric("Critical Gas Rate (qc)", f"{critical_rate:.3f} MMscfd")
+        res_col2.metric("Critical Velocity (vc)", f"{critical_velocity:.2f} ft/s")
 
 # --- 2. HISTORICAL EXCEL FORECASTING MODULE ---
 st.divider()
@@ -58,17 +54,9 @@ def parse_robust_dates(series):
     return pd.to_datetime(series, errors='coerce')
 
 def clean_numeric(series):
-    """Safely extracts numeric values handling floats, NaNs, strings, units, and European separators."""
-    if pd.api.types.is_numeric_dtype(series):
-        return pd.to_numeric(series, errors='coerce')
-    
-    s = series.astype(str).str.strip()
-    s = s.str.replace('\xa0', '', regex=False)
-    s = s.str.replace(r'(?<=\d)\s+(?=\d)', '', regex=True)
-    s = s.str.replace(r'^(\d+),(\d{1,3})$', r'\1.\2', regex=True)
-    s = s.str.replace(',', '', regex=False)
-    extracted = s.str.extract(r'([-+]?\d*\.?\d+)')[0]
-    return pd.to_numeric(extracted, errors='coerce')
+    """Converts numbers to floats and coerces any text or non-numeric strings to NaN."""
+    cleaned = series.astype(str).str.replace(',', '', regex=False).str.strip()
+    return pd.to_numeric(cleaned, errors='coerce')
 
 uploaded_file = st.file_uploader("Upload Historical Well Data (Excel)", type=["xlsx", "xls"])
 
@@ -79,7 +67,7 @@ if uploaded_file is not None:
     sheet_name = st.selectbox("Select Sheet", excel_file.sheet_names)
     
     df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
-    df_raw.columns = [str(col).strip() for col in df_raw.columns]
+    df_raw.columns = df_raw.columns.astype(str).str.strip()
     available_cols = list(df_raw.columns)
     
     st.markdown("**1. Map Excel Columns:**")
@@ -122,23 +110,23 @@ if uploaded_file is not None:
             df['Pwh'] = clean_numeric(df_raw[pwh_col])
             df['Pfl'] = clean_numeric(df_raw[pfl_col])
             
-            # Clean invalid/unparseable rows safely
-            df = df.dropna(subset=['Date', 'Gas_Rate']).sort_values('Date').reset_index(drop=True)
+            # Neglect rows with non-numeric text or missing data
+            df = df.dropna(subset=['Date', 'Gas_Rate', 'Pwh', 'Pfl']).sort_values('Date').reset_index(drop=True)
             
             if len(df) < 3:
-                st.error("Not enough valid date and numeric gas rate rows found in the uploaded file.")
+                st.error("Not enough valid numeric data rows found. Ensure parameters contain valid numbers.")
             else:
-                # Historical Cumulative Production
+                # --- HISTORICAL CUMULATIVE PRODUCTION ---
                 df['Days_Step'] = df['Date'].diff().dt.total_seconds() / (24 * 3600)
                 df['Days_Step'] = df['Days_Step'].fillna(1.0)
                 hist_cum_mmscf = (df['Gas_Rate'] * df['Days_Step']).sum()
 
-                # Strictly positive production active set for DCA curve fitting
                 df_active = df[df['Gas_Rate'] > 0].copy().reset_index(drop=True)
                 
                 if len(df_active) < 3:
-                    st.error("Not enough positive gas production rows found for DCA fitting.")
+                    st.error("Not enough positive gas production data rows found.")
                 else:
+                    # Decline Curve Fitting
                     df_monthly = df_active.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean', 'Pfl': 'mean'}).dropna().reset_index()
                     fit_df = df_monthly if len(df_monthly) >= 3 else df_active
                     
@@ -156,6 +144,7 @@ if uploaded_file is not None:
                     except Exception:
                         fit_Di, fit_b = 0.02, 0.5
 
+                    # Pressure decline rate
                     p_fit = np.polyfit(fit_df.index, fit_df['Pwh'], 1)
                     monthly_dP = max(-p_fit[0], 0.0)
                     
@@ -165,7 +154,7 @@ if uploaded_file is not None:
 
                     st.success(f"DCA Parameters Calculated: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                    # Project 60 months forward from the last historical date
+                    # Project 60 months forward to evaluate limits
                     future_months = 60
                     last_historical_date = df['Date'].iloc[-1]
                     future_t = np.arange(1, future_months + 1)
@@ -185,10 +174,12 @@ if uploaded_file is not None:
                     vc_base = (1.9116 * (60.0 * (water_density - gas_density))**0.25) / (gas_density**0.5)
                     
                     for f_date, P_psia in zip(forecast_dates, forecast_Pwh_psia):
+                        # Base Case
                         area_base = math.pi * ((tubing_id / 2.0) / 12.0)**2
                         qc_base = (3.066894 * P_psia * vc_base * area_base) / (temp_r * z_factor)
                         forecast_qc_base.append(qc_base)
                         
+                        # Workover Case (strictly calculates only on or after the wo_date)
                         if f_date >= wo_dt:
                             area_wo = math.pi * ((wo_tubing / 2.0) / 12.0)**2
                             qc_wo = (3.066894 * P_psia * vc_base * area_wo) / (temp_r * z_factor)
@@ -196,11 +187,13 @@ if uploaded_file is not None:
                         else:
                             forecast_qc_wo.append(None)
 
+                    # --- EXACT WORKOVER DATE PLOTTING FIX ---
                     plot_dates = [last_historical_date] + forecast_dates
                     plot_qg = [qi_last] + list(forecast_qg)
                     plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
                     plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
                     
+                    # Interpolate exact pressure at the workover date for a perfect start point
                     days_from_last = (wo_dt - last_historical_date).days
                     months_from_last = max(0, days_from_last / 30.4375)
                     Pwh_at_wo = max(last_Pwh_psig - (monthly_dP * months_from_last), 0.0)
@@ -211,9 +204,12 @@ if uploaded_file is not None:
                     qc_base_start = (3.066894 * (last_Pwh_psig + 14.7) * vc_base * area_base) / (temp_r * z_factor)
                     
                     plot_qc_base = [qc_base_start] + list(forecast_qc_base)
+                    
+                    # Create plot lists starting strictly EXACTLY from the workover input date
                     wo_dates_plot = [wo_dt] + [d for d, qc in zip(forecast_dates, forecast_qc_wo) if qc is not None]
                     wo_qc_plot = [qc_wo_start] + [qc for qc in forecast_qc_wo if qc is not None]
 
+                    # --- LIMIT EVALUATION FIX ---
                     base_limit_idx = future_months
                     base_death_reason = "End of 5-year forecast"
 
@@ -241,7 +237,9 @@ if uploaded_file is not None:
                                 wo_death_reason = f"Pwh ≤ Pfl ({forecast_dates[i].strftime('%b %Y')})"
                                 break
 
+                    # --- TOTAL CUMULATIVE PRODUCTION ---
                     days_per_month = 30.4375
+                    
                     base_forecast_cum = np.sum(forecast_qg[:base_limit_idx]) * days_per_month if base_limit_idx > 0 else 0.0
                     
                     wo_forecast_cum = 0.0
@@ -256,12 +254,12 @@ if uploaded_file is not None:
                     wo_total_cum = hist_cum_mmscf + wo_forecast_cum
                     incremental_gain = wo_total_cum - base_total_cum
 
-                    st.subheader("📊 Total Lifetime Cumulative Production & Critical Rates")
+                    # Display Dashboard Metrics
+                    st.subheader("📊 Total Lifetime Cumulative Production (Start Date to Failure)")
                     metric_col1, metric_col2, metric_col3 = st.columns(3)
                     
                     with metric_col1:
                         st.info(f"**Base Case ({tubing_id}\" ID)**\n\n"
-                                f"• **Critical Rate (qc):** {qc_base_start:.3f} MMscfd\n\n"
                                 f"• **Historical Cum:** {hist_cum_mmscf:.1f} MMscf\n\n"
                                 f"• **Forecast Cum:** {base_forecast_cum:.1f} MMscf\n\n"
                                 f"• **Total Lifetime Cum:** {base_total_cum:.1f} MMscf\n\n"
@@ -269,7 +267,6 @@ if uploaded_file is not None:
                         
                     with metric_col2:
                         st.success(f"**Workover Case ({wo_tubing}\" ID)**\n\n"
-                                   f"• **Critical Rate (qc):** {qc_wo_start:.3f} MMscfd\n\n"
                                    f"• **Historical Cum:** {hist_cum_mmscf:.1f} MMscf\n\n"
                                    f"• **Forecast Cum:** {wo_forecast_cum:.1f} MMscf\n\n"
                                    f"• **Total Lifetime Cum:** {wo_total_cum:.1f} MMscf\n\n"
@@ -278,9 +275,9 @@ if uploaded_file is not None:
                     with metric_col3:
                         st.warning(f"**Workover Incremental Gain**\n\n"
                                    f"**+{incremental_gain:.1f} MMscf**\n\n"
-                                   f"**qc Reduction:** -{qc_base_start - qc_wo_start:.3f} MMscfd\n\n"
                                    f"Extends production by {max(0, wo_limit_idx - base_limit_idx)} months")
 
+                    # --- EXCEL EXPORT GENERATION ---
                     df_forecast_export = pd.DataFrame({
                         'Forecast Date': [d.strftime('%Y-%m-%d') for d in forecast_dates],
                         'Forecast Gas Rate (MMscfd)': np.round(forecast_qg, 4),
@@ -294,18 +291,15 @@ if uploaded_file is not None:
 
                     df_summary_export = pd.DataFrame({
                         'Parameter / Metric': [
-                            'Base Tubing ID (in)', 'Base Critical Rate qc (MMscfd)',
-                            'Workover Tubing ID (in)', 'Workover Critical Rate qc (MMscfd)',
-                            'Workover Scheduled Date', 'Base Total Lifetime Cumulative (MMscf)',
-                            'Base Failure Reason', 'Workover Total Lifetime Cumulative (MMscf)',
-                            'Workover Failure Reason', 'Incremental Cumulative Gain (MMscf)'
+                            'Base Tubing ID (in)', 'Workover Tubing ID (in)', 'Workover Scheduled Date',
+                            'Base Total Lifetime Cumulative (MMscf)', 'Base Failure Reason',
+                            'Workover Total Lifetime Cumulative (MMscf)', 'Workover Failure Reason',
+                            'Incremental Cumulative Gain (MMscf)'
                         ],
                         'Value': [
-                            f"{tubing_id}", f"{qc_base_start:.3f}",
-                            f"{wo_tubing}", f"{qc_wo_start:.3f}",
-                            f"{wo_date_input.strftime('%Y-%m-%d')}", f"{base_total_cum:.2f}",
-                            f"{base_death_reason}", f"{wo_total_cum:.2f}",
-                            f"{wo_death_reason}", f"{incremental_gain:.2f}"
+                            f"{tubing_id}", f"{wo_tubing}", f"{wo_date_input.strftime('%Y-%m-%d')}",
+                            f"{base_total_cum:.2f}", f"{base_death_reason}",
+                            f"{wo_total_cum:.2f}", f"{wo_death_reason}", f"{incremental_gain:.2f}"
                         ]
                     })
 
@@ -322,12 +316,9 @@ if uploaded_file is not None:
                         use_container_width=True
                     )
 
-                    # Filter out non-production shut-in days cleanly for historical curve plotting
-                    df_hist_plot = df[df['Gas_Rate'] > 0].copy()
-
                     # CHART 1: Production Rate vs Critical Rates
                     fig_rate = go.Figure()
-                    fig_rate.add_trace(go.Scatter(x=df_hist_plot['Date'], y=df_hist_plot['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
+                    fig_rate.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
                     fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
                     
                     if base_limit_idx < future_months:
@@ -342,6 +333,7 @@ if uploaded_file is not None:
                         fig_rate.add_trace(go.Scatter(x=wo_dates_plot, y=wo_qc_plot, mode='lines', name=f'Workover Critical Rate ({wo_tubing}")', line=dict(color='#f1c40f', width=2, dash='dash')))
 
                     fig_rate.add_vline(x=wo_dt.strftime('%Y-%m-%d'), line_dash="dash", line_color="gold", annotation_text="Workover Date", annotation_position="top left")
+
                     fig_rate.update_layout(title="1. Production Rate Forecast vs. Critical Gas Rates", xaxis_title="Date", yaxis_title="Gas Rate (MMscfd)", template="plotly_dark", hovermode="x unified")
                     st.plotly_chart(fig_rate, use_container_width=True)
 
