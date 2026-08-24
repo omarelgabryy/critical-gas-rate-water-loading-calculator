@@ -21,9 +21,8 @@ with col1:
     z_factor = st.number_input("Z-Factor", min_value=0.1000, value=0.8843, step=0.0001, format="%0.4f")
 
 with col2:
-    st.subheader("Wellhead & Line Conditions")
+    st.subheader("Wellhead Conditions")
     pressure_psig = st.number_input("Current Wellhead Pressure (psig)", min_value=0.0, value=278.0, step=1.0)
-    flowline_psig = st.number_input("Min Flowline Pressure Limit (psig)", min_value=0.0, value=50.0, step=5.0)
     temp_f = st.number_input("Wellhead Temperature (°F)", min_value=0.0, value=137.0, step=1.0)
     tubing_id = st.number_input("Tubing Inner Diameter (inches)", min_value=1.0, value=4.5, step=0.125)
 
@@ -78,7 +77,7 @@ if uploaded_file is not None:
     default_date = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['date', 'time', 'timestamp'])), 0)
     default_gas = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['gas', 'qg', 'rate', 'fn'])), min(1, len(available_cols)-1))
     default_pwh = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['pwh', 'pressure', 'pres', 'fq'])), min(2, len(available_cols)-1))
-    default_pfl = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['pfl', 'flowline', 'line'])), -1)
+    default_pfl = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['pfl', 'flowline', 'line'])), min(3, len(available_cols)-1))
 
     with col_map1:
         date_col = st.selectbox("Date Column", available_cols, index=default_date)
@@ -87,9 +86,7 @@ if uploaded_file is not None:
     with col_map3:
         pwh_col = st.selectbox("Wellhead Pressure (Pwh)", available_cols, index=default_pwh)
     with col_map4:
-        pfl_col_options = ["Use Input Field Value Above"] + available_cols
-        pfl_select_index = (default_pfl + 1) if default_pfl != -1 else 0
-        pfl_col = st.selectbox("Flowline Pressure (Pfl)", pfl_col_options, index=pfl_select_index)
+        pfl_col = st.selectbox("Flowline Pressure (Pfl)", available_cols, index=default_pfl)
 
     if st.button("Run Complete Forecast Analysis"):
         try:
@@ -97,12 +94,7 @@ if uploaded_file is not None:
             df['Date'] = parse_robust_dates(df_raw[date_col])
             df['Gas_Rate'] = clean_numeric(df_raw[gas_col]).fillna(0.0) # S.I becomes 0.0
             df['Pwh'] = clean_numeric(df_raw[pwh_col])
-            
-            # Use column data if mapped, otherwise use the numeric input from Section 1
-            if pfl_col != "Use Input Field Value Above":
-                df['Pfl'] = clean_numeric(df_raw[pfl_col])
-            else:
-                df['Pfl'] = flowline_psig
+            df['Pfl'] = clean_numeric(df_raw[pfl_col])
             
             # Clean invalid dates and sort chronologically
             df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
@@ -151,7 +143,7 @@ if uploaded_file is not None:
                 
                 qi_last = float(df_active['Gas_Rate'].iloc[-1])
                 last_Pwh_psig = float(df_active['Pwh'].iloc[-1])
-                last_Pfl_psig = float(df_active['Pfl'].iloc[-1]) if pfl_col != "Use Input Field Value Above" else flowline_psig
+                last_Pfl_psig = float(df_active['Pfl'].iloc[-1])
 
                 st.success(f"Parameters: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
@@ -227,6 +219,7 @@ if uploaded_file is not None:
                 # --- VISUALIZATION 2: WELLHEAD PRESSURE VS FLOWLINE PRESSURE ---
                 fig_pres = go.Figure()
                 fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pwh'], mode='lines', name='Historical Pwh', line=dict(color='#3498db', dash='dot')))
+                fig_pres.add_trace(go.Scatter(x=df['Date'], y=df['Pfl'], mode='lines', name='Historical Pfl', line=dict(color='#e67e22', dash='dot')))
                 fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pwh, mode='lines', name='Forecasted Pwh', line=dict(color='#00bc8c', width=3)))
                 fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pfl, mode='lines', name='Flowline Pressure Limit (Pfl)', line=dict(color='#e74c3c', width=2, dash='dash')))
 
