@@ -54,7 +54,6 @@ def parse_robust_dates(series):
     return pd.to_datetime(series, errors='coerce')
 
 def clean_numeric(series):
-    """Converts numbers to floats and coerces non-numeric strings to NaN."""
     cleaned = series.astype(str).str.replace(',', '', regex=False).str.strip()
     return pd.to_numeric(cleaned, errors='coerce')
 
@@ -117,12 +116,12 @@ if uploaded_file is not None:
                 if len(df_active) < 3:
                     st.error("Not enough active gas production data rows found.")
                 else:
-                    # Compute historical cumulative volume
+                    # Calculate historical cumulative
                     df_active['Days_Step'] = df_active['Date'].diff().dt.total_seconds() / (24 * 3600)
                     df_active['Days_Step'] = df_active['Days_Step'].fillna(30.4375)
                     hist_cum_mmscf = (df_active['Gas_Rate'] * df_active['Days_Step']).sum()
 
-                    # Decline curve fitting
+                    # Decline curve analysis
                     df_monthly = df_active.set_index('Date').resample('MS').agg({'Gas_Rate': 'mean', 'Pwh': 'mean', 'Pfl': 'mean'}).dropna().reset_index()
                     fit_df = df_monthly if len(df_monthly) >= 3 else df_active
                     
@@ -152,7 +151,7 @@ if uploaded_file is not None:
 
                     st.success(f"DCA Parameters Calculated: Annual Decline = {fit_Di*12*100:.1f}% | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                    # Generate forecast rows step-by-step
+                    # Generate forecast steps
                     future_months = 60
                     days_per_month = 30.4375
                     temp_r = temp_f + 459.67
@@ -170,12 +169,10 @@ if uploaded_file is not None:
                         pfl = last_Pfl_psig
                         pwh_psia = pwh + 14.7
 
-                        # Determine active tubing ID based on selected workover date
                         active_tubing = wo_tubing if f_date >= wo_dt else tubing_id
                         area = math.pi * ((active_tubing / 2.0) / 12.0)**2
                         qc = (3.066894 * pwh_psia * vc * area) / (temp_r * z_factor)
 
-                        # Limit Checks
                         status = "Normal Operation"
                         if qg <= qc:
                             status = "Liquid Loading Failure"
@@ -220,15 +217,38 @@ if uploaded_file is not None:
 
                     # --- VISUALIZATION ---
                     fig_rate = go.Figure()
-                    fig_rate.add_trace(go.Scatter(x=df_active['Date'], y=df_active['Gas_Rate'], mode='markers+lines', name='Historical Active Rate', line=dict(color='gray', dash='dot')))
-                    fig_rate.add_trace(go.Scatter(x=df_forecast_table['Date'], y=df_forecast_table['Gas Rate qg (MMscfd)'], mode='lines', name='Forecast Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
-                    fig_rate.add_trace(go.Scatter(x=df_forecast_table['Date'], y=df_forecast_table['Critical Rate qc (MMscfd)'], mode='lines', name='Active Critical Rate (qc)', line=dict(color='#e74c3c', width=2, dash='dash')))
+                    fig_rate.add_trace(go.Scatter(
+                        x=df_active['Date'], 
+                        y=df_active['Gas_Rate'], 
+                        mode='markers+lines', 
+                        name='Historical Active Rate', 
+                        line=dict(color='gray', dash='dot')
+                    ))
+                    fig_rate.add_trace(go.Scatter(
+                        x=df_forecast_table['Date'], 
+                        y=df_forecast_table['Gas Rate qg (MMscfd)'], 
+                        mode='lines', 
+                        name='Forecast Gas Rate (qg)', 
+                        line=dict(color='#2ecc71', width=3)
+                    ))
+                    fig_rate.add_trace(go.Scatter(
+                        x=df_forecast_table['Date'], 
+                        y=df_forecast_table['Critical Rate qc (MMscfd)'], 
+                        mode='lines', 
+                        name='Active Critical Rate (qc)', 
+                        line=dict(color='#e74c3c', width=2, dash='dash')
+                    ))
 
-                    # Fixed Plotly annotation styling
-                    fig_rate.add_vline(x=wo_dt.timestamp() * 1000, line_width=2, line_dash="dash", line_color="gold")
+                    # Corrected Plotly vertical line & annotation syntax
+                    fig_rate.add_vline(
+                        x=wo_dt.strftime('%Y-%m-%d'), 
+                        line_width=2, 
+                        line_dash="dash", 
+                        line_color="gold"
+                    )
                     fig_rate.add_annotation(
-                        x=wo_dt, 
-                        y=df_active['Gas_Rate'].max(), 
+                        x=wo_dt.strftime('%Y-%m-%d'), 
+                        y=float(df_active['Gas_Rate'].max()), 
                         text=f"Workover ({wo_tubing}\")", 
                         showarrow=True, 
                         arrowhead=1, 
