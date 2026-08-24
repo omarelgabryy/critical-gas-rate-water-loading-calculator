@@ -179,19 +179,24 @@ if uploaded_file is not None:
                         qc_base = (3.066894 * P_psia * vc * area_base) / (temp_r * z_factor)
                         forecast_qc_base.append(qc_base)
                         
-                        # Workover case uses original ID before wo_dt, and switch to wo_tubing on/after wo_dt
-                        active_tubing = wo_tubing if f_date >= wo_dt else tubing_id
-                        area_wo = math.pi * ((active_tubing / 2.0) / 12.0)**2
-                        qc_wo = (3.066894 * P_psia * vc * area_wo) / (temp_r * z_factor)
-                        forecast_qc_wo.append(qc_wo)
+                        # Workover critical rate is calculated ONLY starting from wo_dt onwards
+                        if f_date >= wo_dt:
+                            area_wo = math.pi * ((wo_tubing / 2.0) / 12.0)**2
+                            qc_wo = (3.066894 * P_psia * vc * area_wo) / (temp_r * z_factor)
+                            forecast_qc_wo.append(qc_wo)
+                        else:
+                            forecast_qc_wo.append(None)
 
                     # Arrays for seamless plotting
                     plot_dates = [last_historical_date] + forecast_dates
                     plot_qg = [qi_last] + list(forecast_qg)
                     plot_qc_base = [forecast_qc_base[0]] + list(forecast_qc_base)
-                    plot_qc_wo = [forecast_qc_wo[0]] + list(forecast_qc_wo)
                     plot_Pwh = [last_Pwh_psig] + list(forecast_Pwh_psig)
                     plot_Pfl = [last_Pfl_psig] + list(forecast_Pfl_psig)
+
+                    # Filter workover critical rate points starting from workover date
+                    wo_dates_plot = [d for d, qc in zip(forecast_dates, forecast_qc_wo) if qc is not None]
+                    wo_qc_plot = [qc for qc in forecast_qc_wo if qc is not None]
 
                     # --- LIMIT EVALUATION ---
                     base_limit_idx = future_months
@@ -210,7 +215,10 @@ if uploaded_file is not None:
                             break
 
                     for i in range(future_months):
-                        if forecast_qg[i] <= forecast_qc_wo[i]:
+                        # Use workover critical rate if after workover date, otherwise base critical rate
+                        qc_eval = forecast_qc_wo[i] if forecast_qc_wo[i] is not None else forecast_qc_base[i]
+                        
+                        if forecast_qg[i] <= qc_eval:
                             wo_limit_idx = i
                             wo_death_reason = f"Liquid Loading ({forecast_dates[i].strftime('%b %Y')})"
                             break
@@ -260,7 +268,7 @@ if uploaded_file is not None:
                         'Wellhead Pressure Pwh (psig)': np.round(forecast_Pwh_psig, 2),
                         'Flowline Pressure Pfl (psig)': np.round(forecast_Pfl_psig, 2),
                         'Base Critical Rate qc (MMscfd)': np.round(forecast_qc_base, 4),
-                        'Workover Critical Rate qc (MMscfd)': np.round(forecast_qc_wo, 4),
+                        'Workover Critical Rate qc (MMscfd)': [np.round(qc, 4) if qc is not None else np.round(qc_b, 4) for qc, qc_b in zip(forecast_qc_wo, forecast_qc_base)],
                         'Base Active Status': ['Active' if i < base_limit_idx else 'Failed/Loaded' for i in range(future_months)],
                         'Workover Active Status': ['Active' if i < wo_limit_idx else 'Failed/Loaded' for i in range(future_months)]
                     })
@@ -332,7 +340,10 @@ if uploaded_file is not None:
                         fig_rate.add_trace(go.Scatter(x=[forecast_dates[wo_limit_idx]], y=[forecast_qg[wo_limit_idx]], mode='markers', marker=dict(color='gold', size=12, symbol='star'), name='Workover Limit'))
 
                     fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc_base, mode='lines', name=f'Base Critical Rate ({tubing_id}")', line=dict(color='#e74c3c', width=2, dash='dash')))
-                    fig_rate.add_trace(go.Scatter(x=plot_dates, y=plot_qc_wo, mode='lines', name=f'Workover Critical Rate ({wo_tubing}")', line=dict(color='#f1c40f', width=2, dash='dash')))
+                    
+                    # Plot workover critical rate strictly from workover date onwards
+                    if wo_dates_plot:
+                        fig_rate.add_trace(go.Scatter(x=wo_dates_plot, y=wo_qc_plot, mode='lines', name=f'Workover Critical Rate ({wo_tubing}")', line=dict(color='#f1c40f', width=2, dash='dash')))
 
                     # Add vertical marker line for Workover Date
                     fig_rate.add_vline(x=wo_dt.strftime('%Y-%m-%d'), line_dash="dash", line_color="gold", annotation_text="Workover Date", annotation_position="top left")
