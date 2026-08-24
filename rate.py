@@ -62,21 +62,41 @@ def load_and_clean_data(file_path):
     df_clean = df_clean.sort_values(by=date_col)
     
     return df_clean, date_col, gas_col
+# 1. Create the file uploader first (Defines uploaded_file)
+uploaded_file = st.file_uploader("Upload your Excel file", type=["xlsx", "xls"])
+
+# 2. Check if a file was uploaded before processing
 if uploaded_file is not None:
-    # Header row selector in case column headers are not in Row 1
-    header_row = st.number_input("Header Row (Set to row number where column names are located)", min_value=1, value=1, step=1) - 1
+    # Read the uploaded Excel file directly from memory
+    df = pd.read_excel(uploaded_file, sheet_name="Sheet1")
+
+    # Dynamic column identification
+    date_col = df.columns[0]
+    gas_col = 'FN' if 'FN' in df.columns else df.columns[1]
+
+    # Clean data (#REF! formulas, text like '217-181', and zeroes become NaN)
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    df[gas_col] = pd.to_numeric(df[gas_col], errors='coerce')
+
+    # Remove invalid dates and zeroes that cause flatlines
+    df_clean = df.dropna(subset=[date_col, gas_col]).copy()
+    df_clean = df_clean[df_clean[gas_col] > 0]
+    df_clean = df_clean.sort_values(by=date_col)
+
+    # 3. Build and display the chart
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df_clean[date_col],
+        y=df_clean[gas_col],
+        mode='lines+markers',
+        name='Historical Gas Rate'
+    ))
+    fig.update_layout(template="plotly_dark", title="Production Forecast vs. Critical Gas Rate")
     
-    excel_file = pd.ExcelFile(uploaded_file)
-    sheet_name = st.selectbox("Select Sheet", excel_file.sheet_names)
-    
-    df_raw = pd.read_excel(uploaded_file, sheet_name=sheet_name, header=header_row)
-    df_raw.columns = df_raw.columns.astype(str).str.strip()
-    
-    available_cols = list(df_raw.columns)
-    
-    st.markdown("**Map Excel Columns:**")
-    col_map1, col_map2, col_map3 = st.columns(3)
-    
+    st.plotly_chart(fig, use_container_width=True)
+
+else:
+    st.info("Please upload an Excel file to view the historical data graph.")    
     # Auto-detect best guesses for columns
     default_date = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['date', 'time', 'timestamp'])), 0)
     default_gas = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['gas', 'qg', 'rate'])), min(1, len(available_cols)-1))
