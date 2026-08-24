@@ -50,27 +50,26 @@ def arps_hyperbolic(t, qi, Di, b):
     return qi / ((1 + b * Di * t) ** (1 / b))
 
 def parse_robust_dates(series):
-    """Parses dates from mixed strings, ISO dates, and Excel serial numbers safely."""
-    numeric_series = pd.to_numeric(series, errors='coerce')
-    string_mask = numeric_series.isna() & series.notna()
+    """Parses native datetimes, string dates, and Excel serial numbers safely."""
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return pd.to_datetime(series, errors='coerce')
     
+    num_series = pd.to_numeric(series, errors='coerce')
     parsed = pd.Series(index=series.index, dtype='datetime64[ns]')
     
-    # Parse standard string dates
-    if string_mask.any():
-        parsed.update(pd.to_datetime(series[string_mask], format='mixed', errors='coerce'))
+    excel_mask = num_series.notna() & (num_series > 1000) & (num_series < 100000)
+    if excel_mask.any():
+        parsed.update(pd.to_datetime(num_series[excel_mask], unit='D', origin='1899-12-30', errors='coerce'))
         
-    # Parse numeric Excel serial numbers (e.g., 43251 -> 2018-05-31)
-    num_mask = numeric_series.notna()
-    if num_mask.any():
-        parsed.update(pd.to_datetime(numeric_series[num_mask], unit='D', origin='1899-12-30', errors='coerce'))
+    str_mask = parsed.isna() & series.notna()
+    if str_mask.any():
+        parsed.update(pd.to_datetime(series[str_mask], format='mixed', errors='coerce'))
         
     return parsed
 
 uploaded_file = st.file_uploader("Upload Historical Well Data (Excel)", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
-    # Header row selector in case column headers are not in Row 1
     header_row = st.number_input("Header Row (Set to row number where column names are located)", min_value=1, value=1, step=1) - 1
     
     excel_file = pd.ExcelFile(uploaded_file)
@@ -84,7 +83,6 @@ if uploaded_file is not None:
     st.markdown("**Map Excel Columns:**")
     col_map1, col_map2, col_map3 = st.columns(3)
     
-    # Auto-detect best guesses for columns
     default_date = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['date', 'time', 'timestamp'])), 0)
     default_gas = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['gas', 'qg', 'rate'])), min(1, len(available_cols)-1))
     default_pwh = next((i for i, col in enumerate(available_cols) if any(k in col.lower() for k in ['pwh', 'pressure', 'pres'])), min(2, len(available_cols)-1))
@@ -100,45 +98,34 @@ if uploaded_file is not None:
         try:
             df = pd.DataFrame()
             
-            # Robust Date Parsing
             df['Date'] = parse_robust_dates(df_raw[date_col])
-            
-            # Clean numeric values
             df['Gas_Rate'] = pd.to_numeric(df_raw[gas_col], errors='coerce')
             df['Pwh'] = pd.to_numeric(df_raw[pwh_col], errors='coerce')
             
-            # Filter out invalid dates and non-positive gas rates
             df = df.dropna(subset=['Date', 'Gas_Rate']).copy()
             df = df[df['Gas_Rate'] > 0]
             
-            # Fill missing Pwh values so pressure gaps don't drop valid production rows
             df['Pwh'] = df['Pwh'].replace(0, np.nan).ffill().bfill()
-            
-            # Sort chronologically
             df = df.sort_values('Date').reset_index(drop=True)
             
             if len(df) < 3:
                 st.error("Not enough valid data rows found under selected columns. Adjust Header Row or Column Mapping.")
             else:
-                # Convert time index to months
                 df['Months'] = (df['Date'] - df['Date'].iloc[0]).dt.days / 30.4375
                 qi_input = float(df['Gas_Rate'].iloc[-1])
                 
-                # Fit Arps Decline Curve
                 try:
                     popt, _ = curve_fit(arps_hyperbolic, df['Months'], df['Gas_Rate'], p0=[qi_input, 0.02, 0.5], bounds=(0, [np.inf, 1.0, 1.0]))
                     _, fit_Di, fit_b = popt
                 except Exception:
-                    fit_Di, fit_b = 0.02, 0.5  # Fallback parameters if fitting noise fails
+                    fit_Di, fit_b = 0.02, 0.5
                 
-                # Fit Pressure Drop (Linear Regression)
                 p_fit = np.polyfit(df['Months'], df['Pwh'], 1)
                 monthly_dP = max(-p_fit[0], 0.0)
                 last_Pwh_psig = float(df['Pwh'].iloc[-1])
 
                 st.success(f"Calculated Parameters: Decline = {fit_Di*12*100:.1f}%/yr | b = {fit_b:.2f} | Pressure Drop = {monthly_dP:.2f} psi/mo")
 
-                # Forecast 36 Months
                 future_months = 36
                 future_t = np.arange(1, future_months + 1)
                 
@@ -156,7 +143,6 @@ if uploaded_file is not None:
 
                 forecast_dates = [df['Date'].iloc[-1] + pd.DateOffset(months=i) for i in range(1, future_months + 1)]
 
-                # Find Intersection Point
                 loading_month = None
                 for i in range(future_months):
                     if forecast_qg[i] <= forecast_qc[i]:
@@ -168,7 +154,6 @@ if uploaded_file is not None:
                 else:
                     st.info("✅ Well is projected to remain above the critical rate for the next 36 months.")
 
-                # Plotly Visualization
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=df['Date'], y=df['Gas_Rate'], mode='markers+lines', name='Historical Gas Rate', line=dict(color='gray', dash='dot')))
                 fig.add_trace(go.Scatter(x=forecast_dates, y=forecast_qg, mode='lines', name='Forecasted Gas Rate (qg)', line=dict(color='#2ecc71', width=3)))
