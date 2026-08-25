@@ -102,6 +102,18 @@ if uploaded_file is not None:
             value=pd.to_datetime("today").date()
         )
 
+    st.markdown("**3. Economic Parameters:**")
+    col_eco1, col_eco2, col_eco3, col_eco4 = st.columns(4)
+    with col_eco1:
+        gas_price_mscf = st.number_input("Gas Price ($/Mscf)", min_value=0.0, value=3.00, step=0.10)
+        gas_price_mmscf = gas_price_mscf * 1000 
+    with col_eco2:
+        opex_mmscf = st.number_input("OPEX ($/MMscf)", min_value=0.0, value=500.0, step=50.0)
+    with col_eco3:
+        workover_cost = st.number_input("Workover CAPEX ($)", min_value=0.0, value=150000.0, step=10000.0)
+    with col_eco4:
+        discount_rate = st.number_input("Annual Discount Rate (%)", min_value=0.0, value=10.0, step=1.0) / 100.0
+
     if st.button("Run Forecast & Workover Analysis", type="primary"):
         try:
             df = pd.DataFrame()
@@ -254,6 +266,57 @@ if uploaded_file is not None:
                     wo_total_cum = hist_cum_mmscf + wo_forecast_cum
                     incremental_gain = wo_total_cum - base_total_cum
 
+                    # --- ECONOMIC CALCULATIONS ---
+                    net_revenue_per_mmscf = gas_price_mmscf - opex_mmscf
+                    monthly_discount_rate = discount_rate / 12.0
+                    
+                    # Calculate monthly cash flows
+                    base_cf = []
+                    wo_cf = []
+                    incremental_cf = []
+                    cum_discounted_inc_cf = []
+                    
+                    running_npv = -workover_cost
+                    payout_month = None
+                    
+                    for i in range(future_months):
+                        # Base case monthly volume (check if alive)
+                        base_vol = forecast_qg[i] * days_per_month if i < base_limit_idx else 0.0
+                        
+                        # Workover case monthly volume (check if alive and if workover has happened)
+                        if forecast_dates[i] >= wo_dt and i < wo_limit_idx:
+                            wo_vol = forecast_qg[i] * days_per_month
+                        elif forecast_dates[i] < wo_dt and i < base_limit_idx:
+                            wo_vol = forecast_qg[i] * days_per_month
+                        else:
+                            wo_vol = 0.0
+                            
+                        # Cash flows for the month
+                        b_cash = base_vol * net_revenue_per_mmscf
+                        w_cash = wo_vol * net_revenue_per_mmscf
+                        
+                        # Apply workover CAPEX on the exact month of the workover
+                        if i == 0 or (i > 0 and forecast_dates[i-1] < wo_dt and forecast_dates[i] >= wo_dt):
+                            w_cash -= workover_cost
+                            
+                        inc_cash = w_cash - b_cash
+                        
+                        # Discounted Cash Flow (NPV)
+                        discount_factor = (1 + monthly_discount_rate) ** (i + 1)
+                        discounted_inc_cash = inc_cash / discount_factor
+                        
+                        running_npv += discounted_inc_cash
+                        cum_discounted_inc_cf.append(running_npv)
+                        
+                        # Check for Payout (when running NPV crosses zero)
+                        if running_npv >= 0 and payout_month is None and forecast_dates[i] >= wo_dt:
+                            payout_month = forecast_dates[i]
+
+                    # Final Economic Metrics
+                    total_incremental_revenue = incremental_gain * net_revenue_per_mmscf
+                    final_npv = cum_discounted_inc_cf[-1]
+                    roi = (final_npv / workover_cost) * 100 if workover_cost > 0 else 0
+
                     # Display Dashboard Metrics
                     st.subheader("📊 Total Lifetime Cumulative Production (Start Date to Failure)")
                     metric_col1, metric_col2, metric_col3 = st.columns(3)
@@ -277,6 +340,20 @@ if uploaded_file is not None:
                                    f"**+{incremental_gain:.1f} MMscf**\n\n"
                                    f"Extends production by {max(0, wo_limit_idx - base_limit_idx)} months")
 
+                    # --- ECONOMIC DASHBOARD ---
+                    st.divider()
+                    st.subheader("💰 Economic Viability & Payout Analysis")
+                    eco_col1, eco_col2, eco_col3, eco_col4 = st.columns(4)
+                    
+                    eco_col1.metric("Incremental Net Revenue", f"${total_incremental_revenue:,.0f}")
+                    eco_col2.metric("Workover NPV (@ {:.0f}%)".format(discount_rate*100), f"${final_npv:,.0f}")
+                    eco_col3.metric("Return on Investment (ROI)", f"{roi:,.1f}%")
+                    
+                    if payout_month:
+                        eco_col4.metric("Payout Achieved", payout_month.strftime('%b %Y'))
+                    else:
+                        eco_col4.metric("Payout Achieved", "Did Not Payout", delta_color="inverse")
+
                     # --- EXCEL EXPORT GENERATION ---
                     df_forecast_export = pd.DataFrame({
                         'Forecast Date': [d.strftime('%Y-%m-%d') for d in forecast_dates],
@@ -286,7 +363,8 @@ if uploaded_file is not None:
                         'Base Critical Rate qc (MMscfd)': np.round(forecast_qc_base, 4),
                         'Workover Critical Rate qc (MMscfd)': [np.round(qc, 4) if qc is not None else "N/A" for qc in forecast_qc_wo],
                         'Base Active Status': ['Active' if i < base_limit_idx else 'Failed/Loaded' for i in range(future_months)],
-                        'Workover Active Status': ['Active' if (forecast_dates[i] >= wo_dt and i < wo_limit_idx) or (forecast_dates[i] < wo_dt and i < base_limit_idx) else 'Failed/Loaded' for i in range(future_months)]
+                        'Workover Active Status': ['Active' if (forecast_dates[i] >= wo_dt and i < wo_limit_idx) or (forecast_dates[i] < wo_dt and i < base_limit_idx) else 'Failed/Loaded' for i in range(future_months)],
+                        'Cumulative NPV ($)': np.round(cum_discounted_inc_cf, 2)
                     })
 
                     df_summary_export = pd.DataFrame({
@@ -294,12 +372,16 @@ if uploaded_file is not None:
                             'Base Tubing ID (in)', 'Workover Tubing ID (in)', 'Workover Scheduled Date',
                             'Base Total Lifetime Cumulative (MMscf)', 'Base Failure Reason',
                             'Workover Total Lifetime Cumulative (MMscf)', 'Workover Failure Reason',
-                            'Incremental Cumulative Gain (MMscf)'
+                            'Incremental Cumulative Gain (MMscf)',
+                            'Gas Price ($/Mscf)', 'OPEX ($/MMscf)', 'Workover Cost ($)',
+                            'Incremental Net Revenue ($)', 'Workover NPV ($)', 'ROI (%)'
                         ],
                         'Value': [
                             f"{tubing_id}", f"{wo_tubing}", f"{wo_date_input.strftime('%Y-%m-%d')}",
                             f"{base_total_cum:.2f}", f"{base_death_reason}",
-                            f"{wo_total_cum:.2f}", f"{wo_death_reason}", f"{incremental_gain:.2f}"
+                            f"{wo_total_cum:.2f}", f"{wo_death_reason}", f"{incremental_gain:.2f}",
+                            f"{gas_price_mscf:.2f}", f"{opex_mmscf:.2f}", f"{workover_cost:.2f}",
+                            f"{total_incremental_revenue:.2f}", f"{final_npv:.2f}", f"{roi:.2f}"
                         ]
                     })
 
@@ -345,6 +427,18 @@ if uploaded_file is not None:
                     fig_pres.add_trace(go.Scatter(x=plot_dates, y=plot_Pfl, mode='lines', name='Flowline Pressure Limit (Pfl)', line=dict(color='#e74c3c', width=2, dash='dash')))
                     fig_pres.update_layout(title="2. Wellhead Pressure (Pwh) Forecast vs. Flowline Pressure Limit (Pfl)", xaxis_title="Date", yaxis_title="Pressure (psig)", template="plotly_dark", hovermode="x unified")
                     st.plotly_chart(fig_pres, use_container_width=True)
+                    
+                    # CHART 3: Cumulative Discounted Cash Flow (Payout Chart)
+                    fig_eco = go.Figure()
+                    fig_eco.add_trace(go.Scatter(x=forecast_dates, y=cum_discounted_inc_cf, mode='lines', name='Cumulative Incremental NPV', line=dict(color='#3498db', width=3)))
+                    fig_eco.add_hline(y=0, line_dash="dash", line_color="white", annotation_text="Breakeven (Payout)", annotation_position="bottom right")
+                    
+                    if payout_month:
+                        payout_idx = forecast_dates.index(payout_month)
+                        fig_eco.add_trace(go.Scatter(x=[payout_month], y=[cum_discounted_inc_cf[payout_idx]], mode='markers', marker=dict(color='#2ecc71', size=12), name='Payout Point'))
+
+                    fig_eco.update_layout(title="3. Workover Economics: Cumulative Discounted Cash Flow", xaxis_title="Date", yaxis_title="Net Present Value ($)", template="plotly_dark", hovermode="x unified")
+                    st.plotly_chart(fig_eco, use_container_width=True)
 
         except Exception as e:
             st.error(f"Error executing analysis: {e}")
